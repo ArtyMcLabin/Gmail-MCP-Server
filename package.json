@@ -11,6 +11,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "auth": "node dist/index.js auth",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
@@ -60,6 +62,7 @@
   "devDependencies": {
     "@types/node": "^20.10.5",
     "@types/nodemailer": "^6.4.17",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
   }
 }

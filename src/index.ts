@@ -19,6 +19,7 @@ import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
+import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1223,58 +1224,23 @@ async function main() {
                     const profile = await gmail.users.getProfile({ userId: 'me' });
                     const myEmail = profile.data.emailAddress?.toLowerCase() || '';
 
-                    // Helper function to parse email addresses from header value
-                    const parseEmails = (headerValue: string): string[] => {
-                        if (!headerValue) return [];
-                        // Split by comma, but handle cases like "Name <email@example.com>"
-                        const emails: string[] = [];
-                        const parts = headerValue.split(',');
-                        for (const part of parts) {
-                            const trimmed = part.trim();
-                            // Extract email from "Name <email>" format
-                            const match = trimmed.match(/<([^>]+)>/);
-                            if (match) {
-                                emails.push(match[1].trim());
-                            } else if (trimmed.includes('@')) {
-                                emails.push(trimmed);
-                            }
-                        }
-                        return emails;
-                    };
-
-                    // Helper function to filter out authenticated user's email
-                    const filterMyEmail = (emails: string[]): string[] => {
-                        return emails.filter(email => email.toLowerCase() !== myEmail);
-                    };
-
-                    // Build recipient list:
-                    // - TO: original sender (From)
-                    // - CC: original To and CC (excluding myself)
-                    const fromEmails = parseEmails(originalFrom);
-                    const toEmails = parseEmails(originalTo);
-                    const ccEmails = parseEmails(originalCc);
-
-                    // TO recipients: original From (the person who sent the email)
-                    const replyTo = filterMyEmail(fromEmails);
-
-                    // CC recipients: everyone else who was on To and CC, excluding myself
-                    const replyCc = filterMyEmail([...toEmails, ...ccEmails]);
+                    // Build recipient list using helper functions
+                    const { to: replyTo, cc: replyCc } = buildReplyAllRecipients(
+                        originalFrom,
+                        originalTo,
+                        originalCc,
+                        myEmail
+                    );
 
                     if (replyTo.length === 0) {
                         throw new Error('Could not determine recipient for reply');
                     }
 
                     // Build subject with "Re:" prefix if not already present
-                    let replySubject = originalSubject;
-                    if (!replySubject.toLowerCase().startsWith('re:')) {
-                        replySubject = `Re: ${replySubject}`;
-                    }
+                    const replySubject = addRePrefix(originalSubject);
 
                     // Build References header (original References + original Message-ID)
-                    let references = originalReferences;
-                    if (originalMessageId) {
-                        references = references ? `${references} ${originalMessageId}` : originalMessageId;
-                    }
+                    const references = buildReferencesHeader(originalReferences, originalMessageId);
 
                     // Prepare the email arguments for handleEmailAction
                     const emailArgs = {
