@@ -200,7 +200,8 @@ const SendEmailSchema = z.object({
     cc: z.array(z.string()).optional().describe("List of CC recipients"),
     bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
     threadId: z.string().optional().describe("Thread ID to reply to"),
-    inReplyTo: z.string().optional().describe("Message ID being replied to"),
+    inReplyTo: z.string().optional().describe("Message ID being replied to (angle brackets optional)"),
+    references: z.union([z.string(), z.array(z.string())]).optional().describe("Message ID(s) for the References header. For long threads, provide an array of all message IDs in the chain. If not provided, defaults to inReplyTo value."),
     attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
 });
 

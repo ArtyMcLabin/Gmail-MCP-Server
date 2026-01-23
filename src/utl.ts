@@ -16,6 +16,31 @@ function encodeEmailHeader(text: string): string {
     return text;
 }
 
+/**
+ * Ensures a Message-ID is properly formatted with angle brackets per RFC 2822.
+ * Gmail API returns Message-IDs that may or may not include angle brackets,
+ * but the In-Reply-To and References headers require them.
+ */
+function formatMessageId(messageId: string): string {
+    const trimmed = messageId.trim();
+    if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+        return trimmed;
+    }
+    return `<${trimmed}>`;
+}
+
+/**
+ * Formats the References header value. Can accept a single message ID or
+ * an array of message IDs (for long thread chains).
+ * Per RFC 2822, References should contain the full chain of message IDs.
+ */
+function formatReferences(references: string | string[]): string {
+    if (Array.isArray(references)) {
+        return references.map(formatMessageId).join(' ');
+    }
+    return formatMessageId(references);
+}
+
 export const validateEmail = (email: string): boolean => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return emailRegex.test(email);
@@ -49,9 +74,10 @@ export function createEmailMessage(validatedArgs: any): string {
         validatedArgs.cc ? `Cc: ${validatedArgs.cc.join(', ')}` : '',
         validatedArgs.bcc ? `Bcc: ${validatedArgs.bcc.join(', ')}` : '',
         `Subject: ${encodedSubject}`,
-        // Add thread-related headers if specified
-        validatedArgs.inReplyTo ? `In-Reply-To: ${validatedArgs.inReplyTo}` : '',
-        validatedArgs.inReplyTo ? `References: ${validatedArgs.inReplyTo}` : '',
+        // Add thread-related headers if specified (RFC 2822 requires angle brackets)
+        validatedArgs.inReplyTo ? `In-Reply-To: ${formatMessageId(validatedArgs.inReplyTo)}` : '',
+        validatedArgs.references ? `References: ${formatReferences(validatedArgs.references)}` :
+            (validatedArgs.inReplyTo ? `References: ${formatMessageId(validatedArgs.inReplyTo)}` : ''),
         'MIME-Version: 1.0',
     ].filter(Boolean);
 
@@ -127,6 +153,12 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         });
     }
 
+    // Format thread-related headers with proper angle brackets (RFC 2822)
+    const inReplyTo = validatedArgs.inReplyTo ? formatMessageId(validatedArgs.inReplyTo) : undefined;
+    const references = validatedArgs.references
+        ? formatReferences(validatedArgs.references)
+        : (validatedArgs.inReplyTo ? formatMessageId(validatedArgs.inReplyTo) : undefined);
+
     const mailOptions = {
         from: 'me', // Gmail API will replace this with the authenticated user
         to: validatedArgs.to.join(', '),
@@ -136,8 +168,8 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         text: validatedArgs.body,
         html: validatedArgs.htmlBody,
         attachments: attachments,
-        inReplyTo: validatedArgs.inReplyTo,
-        references: validatedArgs.inReplyTo
+        inReplyTo: inReplyTo,
+        references: references
     };
 
     // Generate the raw message
