@@ -21,7 +21,7 @@ function encodeEmailHeader(text: string): string {
  * Gmail API returns Message-IDs that may or may not include angle brackets,
  * but the In-Reply-To and References headers require them.
  */
-function formatMessageId(messageId: string): string {
+export function formatMessageId(messageId: string): string {
     const trimmed = messageId.trim();
     if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
         return trimmed;
@@ -34,7 +34,7 @@ function formatMessageId(messageId: string): string {
  * an array of message IDs (for long thread chains).
  * Per RFC 2822, References should contain the full chain of message IDs.
  */
-function formatReferences(references: string | string[]): string {
+export function formatReferences(references: string | string[]): string {
     if (Array.isArray(references)) {
         return references.map(formatMessageId).join(' ');
     }
