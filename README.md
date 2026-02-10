@@ -23,6 +23,7 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 
 ## Features
 
+- **Multi-account support** - manage multiple Gmail accounts from a single server instance
 - Send emails with subject, content, **attachments**, and recipients
 - **Full attachment support** - send and receive file attachments
 - **Download email attachments** to local filesystem
@@ -194,11 +195,66 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2ca
 
 This approach allows authentication flows to work properly in environments where localhost isn't accessible, such as containerized applications or cloud servers.
 
+## Multi-Account Support
+
+You can configure multiple Gmail accounts and switch between them using the optional `account` parameter on any tool.
+
+### Authenticating Additional Accounts
+
+```bash
+# Authenticate your default account (same as before)
+npx @gongrzhe/server-gmail-autoauth-mcp auth
+
+# Authenticate a "work" account
+npx @gongrzhe/server-gmail-autoauth-mcp auth work
+
+# Authenticate a "personal" account
+npx @gongrzhe/server-gmail-autoauth-mcp auth personal
+
+# With custom callback URL for cloud environments
+npx @gongrzhe/server-gmail-autoauth-mcp auth work https://gmail.example.com/oauth2callback
+```
+
+Credentials are stored as:
+- `~/.gmail-mcp/credentials.json` - "default" account
+- `~/.gmail-mcp/credentials-work.json` - "work" account
+- `~/.gmail-mcp/credentials-personal.json` - "personal" account
+
+### Using Multiple Accounts
+
+All tools accept an optional `account` parameter. Omit it to use the default account:
+
+```json
+// Search default account
+{ "query": "from:boss@company.com" }
+
+// Search work account
+{ "query": "from:boss@company.com", "account": "work" }
+
+// Search personal account
+{ "query": "from:friend@gmail.com", "account": "personal" }
+```
+
+Use `list_accounts` to see all configured accounts.
+
+### Backwards Compatibility
+
+- Existing single-account setups work without any changes
+- The `GMAIL_CREDENTIALS_PATH` environment variable still works (loads as "default")
+- All tools work without the `account` parameter (uses default)
+
 ## Available Tools
 
 The server provides the following tools that can be used through Claude Desktop:
 
-### 1. Send Email (`send_email`)
+### 1. List Accounts (`list_accounts`)
+Lists all configured Gmail accounts.
+
+```json
+{}
+```
+
+### 2. Send Email (`send_email`)
 
 Sends a new email immediately. Supports plain text, HTML, or multipart emails **with optional file attachments**.
 

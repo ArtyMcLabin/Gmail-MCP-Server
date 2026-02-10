@@ -25,7 +25,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Configuration paths
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
 const OAUTH_PATH = process.env.GMAIL_OAUTH_PATH || path.join(CONFIG_DIR, 'gcp-oauth.keys.json');
-const CREDENTIALS_PATH = process.env.GMAIL_CREDENTIALS_PATH || path.join(CONFIG_DIR, 'credentials.json');
+// Multi-account support
+const gmailClients: Map<string, ReturnType<typeof google.gmail>> = new Map();
+const defaultAccount = 'default';
 
 // Type definitions for Gmail API responses
 interface GmailMessagePart {
@@ -56,8 +58,53 @@ interface EmailContent {
     html: string;
 }
 
-// OAuth2 configuration
-let oauth2Client: OAuth2Client;
+function getCredentialsPath(accountName: string): string {
+	if (accountName === 'default') {
+		return path.join(CONFIG_DIR, 'credentials.json');
+	}
+	return path.join(CONFIG_DIR, `credentials-${accountName}.json`);
+}
+
+function getOAuth2Client(callbackUrl?: string): OAuth2Client {
+	const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
+
+	if (fs.existsSync(localOAuthPath) && !fs.existsSync(OAUTH_PATH)) {
+		if (!fs.existsSync(CONFIG_DIR)) {
+			fs.mkdirSync(CONFIG_DIR, { recursive: true });
+		}
+		fs.copyFileSync(localOAuthPath, OAUTH_PATH);
+		console.log('OAuth keys found in current directory, copied to global config.');
+	}
+
+	if (!fs.existsSync(OAUTH_PATH)) {
+		console.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
+		process.exit(1);
+	}
+
+	const keysContent = JSON.parse(fs.readFileSync(OAUTH_PATH, 'utf8'));
+	const keys = keysContent.installed || keysContent.web;
+
+	if (!keys) {
+		console.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
+		process.exit(1);
+	}
+
+	return new OAuth2Client(
+		keys.client_id,
+		keys.client_secret,
+		callbackUrl || "http://localhost:3000/oauth2callback"
+	);
+}
+
+function getGmailClient(account?: string) {
+	const name = account || defaultAccount;
+	const client = gmailClients.get(name);
+	if (!client) {
+		const available = Array.from(gmailClients.keys()).join(', ');
+		throw new Error(`Account "${name}" not found. Available: ${available}`);
+	}
+	return client;
+}
 
 /**
  * Recursively extract email body content from MIME message parts
@@ -93,101 +140,116 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
     return { text: textContent, html: htmlContent };
 }
 
-async function loadCredentials() {
-    try {
-        // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH &&!fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
-        }
+async function loadAllAccounts() {
+	if (!fs.existsSync(CONFIG_DIR)) {
+		fs.mkdirSync(CONFIG_DIR, { recursive: true });
+	}
 
-        // Check for OAuth keys in current directory first, then in config directory
-        const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
-        let oauthPath = OAUTH_PATH;
+	// If GMAIL_CREDENTIALS_PATH env var is set, load just that as "default"
+	if (process.env.GMAIL_CREDENTIALS_PATH) {
+		const credPath = process.env.GMAIL_CREDENTIALS_PATH;
+		if (fs.existsSync(credPath)) {
+			try {
+				const client = getOAuth2Client();
+				const credentials = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+				client.setCredentials(credentials);
+				gmailClients.set('default', google.gmail({ version: 'v1', auth: client }));
+			} catch (error) {
+				console.error('Failed to load credentials from GMAIL_CREDENTIALS_PATH:', error);
+			}
+		}
+		return;
+	}
 
-        if (fs.existsSync(localOAuthPath)) {
-            // If found in current directory, copy to config directory
-            fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
-        }
+	// Glob credentials files in config dir
+	const files = fs.readdirSync(CONFIG_DIR).filter(f => /^credentials(-[\w-]+)?\.json$/.test(f));
 
-        if (!fs.existsSync(OAUTH_PATH)) {
-            console.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
-            process.exit(1);
-        }
+	for (const file of files) {
+		const match = file.match(/^credentials(?:-([\w-]+))?\.json$/);
+		if (!match) continue;
 
-        const keysContent = JSON.parse(fs.readFileSync(OAUTH_PATH, 'utf8'));
-        const keys = keysContent.installed || keysContent.web;
+		const accountName = match[1] || 'default';
+		const credPath = path.join(CONFIG_DIR, file);
 
-        if (!keys) {
-            console.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
-            process.exit(1);
-        }
+		try {
+			const client = getOAuth2Client();
+			const credentials = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+			client.setCredentials(credentials);
+			gmailClients.set(accountName, google.gmail({ version: 'v1', auth: client }));
+		} catch (error) {
+			console.error(`Failed to load account "${accountName}":`, error);
+		}
+	}
 
-        const callback = process.argv[2] === 'auth' && process.argv[3] 
-        ? process.argv[3] 
-        : "http://localhost:3000/oauth2callback";
-
-        oauth2Client = new OAuth2Client(
-            keys.client_id,
-            keys.client_secret,
-            callback
-        );
-
-        if (fs.existsSync(CREDENTIALS_PATH)) {
-            const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-            oauth2Client.setCredentials(credentials);
-        }
-    } catch (error) {
-        console.error('Error loading credentials:', error);
-        process.exit(1);
-    }
+	if (gmailClients.size === 0) {
+		console.error('No Gmail accounts configured. Run "npm run auth" first.');
+	}
 }
 
-async function authenticate() {
-    const server = http.createServer();
-    server.listen(3000);
+async function authenticate(accountName?: string, callbackUrl?: string) {
+	const name = accountName || 'default';
+	const credPath = getCredentialsPath(name);
 
-    return new Promise<void>((resolve, reject) => {
-        const authUrl = oauth2Client.generateAuthUrl({
-            access_type: 'offline',
-            scope: [
-                'https://www.googleapis.com/auth/gmail.modify',
-                'https://www.googleapis.com/auth/gmail.settings.basic'
-            ],
-        });
+	if (!fs.existsSync(CONFIG_DIR)) {
+		fs.mkdirSync(CONFIG_DIR, { recursive: true });
+	}
 
-        console.log('Please visit this URL to authenticate:', authUrl);
-        open(authUrl);
+	const oauth2Client = getOAuth2Client(callbackUrl);
 
-        server.on('request', async (req, res) => {
-            if (!req.url?.startsWith('/oauth2callback')) return;
+	const httpServer = http.createServer();
+	httpServer.listen(3000);
 
-            const url = new URL(req.url, 'http://localhost:3000');
-            const code = url.searchParams.get('code');
+	return new Promise<void>((resolve, reject) => {
+		const authUrl = oauth2Client.generateAuthUrl({
+			access_type: 'offline',
+			scope: [
+				'https://www.googleapis.com/auth/gmail.modify',
+				'https://www.googleapis.com/auth/gmail.settings.basic'
+			],
+		});
 
-            if (!code) {
-                res.writeHead(400);
-                res.end('No code provided');
-                reject(new Error('No code provided'));
-                return;
-            }
+		console.log(`Authenticating account "${name}"...`);
+		console.log('Please visit this URL to authenticate:', authUrl);
+		open(authUrl);
 
-            try {
-                const { tokens } = await oauth2Client.getToken(code);
-                oauth2Client.setCredentials(tokens);
-                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(tokens));
+		httpServer.on('request', async (req, res) => {
+			if (!req.url?.startsWith('/oauth2callback')) return;
 
-                res.writeHead(200);
-                res.end('Authentication successful! You can close this window.');
-                server.close();
-                resolve();
-            } catch (error) {
-                res.writeHead(500);
-                res.end('Authentication failed');
-                reject(error);
-            }
-        });
-    });
+			const url = new URL(req.url, 'http://localhost:3000');
+			const code = url.searchParams.get('code');
+
+			if (!code) {
+				res.writeHead(400);
+				res.end('No code provided');
+				reject(new Error('No code provided'));
+				return;
+			}
+
+			try {
+				const { tokens } = await oauth2Client.getToken(code);
+				oauth2Client.setCredentials(tokens);
+				fs.writeFileSync(credPath, JSON.stringify(tokens));
+
+				res.writeHead(200);
+				res.end(`Authentication successful for account "${name}"! You can close this window.`);
+				httpServer.close();
+				resolve();
+			} catch (error) {
+				res.writeHead(500);
+				res.end('Authentication failed');
+				reject(error);
+			}
+		});
+	});
+}
+
+// Account parameter added to all tool schemas for multi-account support
+const AccountParam = {
+	account: z.string().optional().describe("Gmail account name. Omit for default. Use list_accounts to see available."),
+};
+
+function withAccountParam<T extends z.ZodRawShape>(schema: z.ZodObject<T>) {
+	return schema.extend(AccountParam);
 }
 
 // Schema definitions
@@ -321,16 +383,24 @@ const DownloadAttachmentSchema = z.object({
 
 // Main function
 async function main() {
-    await loadCredentials();
-
     if (process.argv[2] === 'auth') {
-        await authenticate();
+        let accountName: string | undefined;
+        let callbackUrl: string | undefined;
+
+        for (const arg of process.argv.slice(3)) {
+            if (arg.startsWith('http')) {
+                callbackUrl = arg;
+            } else {
+                accountName = arg;
+            }
+        }
+
+        await authenticate(accountName, callbackUrl);
         console.log('Authentication completed successfully');
         process.exit(0);
     }
 
-    // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    await loadAllAccounts();
 
     // Server implementation
     const server = new Server({
@@ -345,105 +415,132 @@ async function main() {
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: [
             {
+                name: "list_accounts",
+                description: "Lists all configured Gmail accounts",
+                inputSchema: zodToJsonSchema(z.object({})),
+            },
+            {
                 name: "send_email",
                 description: "Sends a new email",
-                inputSchema: zodToJsonSchema(SendEmailSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(SendEmailSchema)),
             },
             {
                 name: "draft_email",
                 description: "Draft a new email",
-                inputSchema: zodToJsonSchema(SendEmailSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(SendEmailSchema)),
             },
             {
                 name: "read_email",
                 description: "Retrieves the content of a specific email",
-                inputSchema: zodToJsonSchema(ReadEmailSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(ReadEmailSchema)),
             },
             {
                 name: "search_emails",
                 description: "Searches for emails using Gmail search syntax",
-                inputSchema: zodToJsonSchema(SearchEmailsSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(SearchEmailsSchema)),
             },
             {
                 name: "modify_email",
                 description: "Modifies email labels (move to different folders)",
-                inputSchema: zodToJsonSchema(ModifyEmailSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(ModifyEmailSchema)),
             },
             {
                 name: "delete_email",
                 description: "Permanently deletes an email",
-                inputSchema: zodToJsonSchema(DeleteEmailSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(DeleteEmailSchema)),
             },
             {
                 name: "list_email_labels",
                 description: "Retrieves all available Gmail labels",
-                inputSchema: zodToJsonSchema(ListEmailLabelsSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(ListEmailLabelsSchema)),
             },
             {
                 name: "batch_modify_emails",
                 description: "Modifies labels for multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchModifyEmailsSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(BatchModifyEmailsSchema)),
             },
             {
                 name: "batch_delete_emails",
                 description: "Permanently deletes multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchDeleteEmailsSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(BatchDeleteEmailsSchema)),
             },
             {
                 name: "create_label",
                 description: "Creates a new Gmail label",
-                inputSchema: zodToJsonSchema(CreateLabelSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(CreateLabelSchema)),
             },
             {
                 name: "update_label",
                 description: "Updates an existing Gmail label",
-                inputSchema: zodToJsonSchema(UpdateLabelSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(UpdateLabelSchema)),
             },
             {
                 name: "delete_label",
                 description: "Deletes a Gmail label",
-                inputSchema: zodToJsonSchema(DeleteLabelSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(DeleteLabelSchema)),
             },
             {
                 name: "get_or_create_label",
                 description: "Gets an existing label by name or creates it if it doesn't exist",
-                inputSchema: zodToJsonSchema(GetOrCreateLabelSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(GetOrCreateLabelSchema)),
             },
             {
                 name: "create_filter",
                 description: "Creates a new Gmail filter with custom criteria and actions",
-                inputSchema: zodToJsonSchema(CreateFilterSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(CreateFilterSchema)),
             },
             {
                 name: "list_filters",
                 description: "Retrieves all Gmail filters",
-                inputSchema: zodToJsonSchema(ListFiltersSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(ListFiltersSchema)),
             },
             {
                 name: "get_filter",
                 description: "Gets details of a specific Gmail filter",
-                inputSchema: zodToJsonSchema(GetFilterSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(GetFilterSchema)),
             },
             {
                 name: "delete_filter",
                 description: "Deletes a Gmail filter",
-                inputSchema: zodToJsonSchema(DeleteFilterSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(DeleteFilterSchema)),
             },
             {
                 name: "create_filter_from_template",
                 description: "Creates a filter using a pre-defined template for common scenarios",
-                inputSchema: zodToJsonSchema(CreateFilterFromTemplateSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(CreateFilterFromTemplateSchema)),
             },
             {
                 name: "download_attachment",
                 description: "Downloads an email attachment to a specified location",
-                inputSchema: zodToJsonSchema(DownloadAttachmentSchema),
+                inputSchema: zodToJsonSchema(withAccountParam(DownloadAttachmentSchema)),
             },
         ],
     }))
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: args } = request.params;
+
+        // Handle list_accounts before resolving gmail client
+        if (name === 'list_accounts') {
+            const accounts = Array.from(gmailClients.keys());
+            const accountList = accounts.map(a =>
+                a === defaultAccount ? `${a} (default)` : a
+            ).join('\n');
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: accounts.length > 0
+                            ? `Configured accounts:\n${accountList}`
+                            : 'No accounts configured. Run auth first.',
+                    },
+                ],
+            };
+        }
+
+        const account = (args as any)?.account as string | undefined;
+        const gmail = getGmailClient(account);
 
         async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
             let message: string;
