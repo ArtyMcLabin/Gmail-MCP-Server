@@ -25,6 +25,7 @@ dist/
 Thumbs.db
 
 # Project specific
+mcp-config.json
 gcp-oauth.keys.json
 .calendar-mcp/
 credentials.json

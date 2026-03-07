@@ -35,12 +35,12 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gongrzhe/server-gmail-autoauth-mcp.git"
+    "url": "git+https://github.com/ArtyMcLabin/Gmail-MCP-Server.git"
   },
   "bugs": {
-    "url": "https://github.com/gongrzhe/server-gmail-autoauth-mcp/issues"
+    "url": "https://github.com/ArtyMcLabin/Gmail-MCP-Server/issues"
   },
-  "homepage": "https://github.com/gongrzhe/server-gmail-autoauth-mcp#readme",
+  "homepage": "https://github.com/ArtyMcLabin/Gmail-MCP-Server#readme",
   "publishConfig": {
     "access": "public"
   },
