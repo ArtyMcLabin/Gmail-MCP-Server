@@ -98,7 +98,7 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH &&!fs.existsSync(CONFIG_DIR)) {
+        if (!process.env.GMAIL_OAUTH_PATH && !process.env.GMAIL_CREDENTIALS_PATH && !fs.existsSync(CONFIG_DIR)) {
             fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
         }
 
@@ -252,13 +252,17 @@ async function main() {
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     // Server implementation
-    const server = new Server({
-        name: "gmail",
-        version: "1.0.0",
-        capabilities: {
-            tools: {},
+    const server = new Server(
+        {
+            name: "gmail",
+            version: "1.0.0",
         },
-    });
+        {
+            capabilities: {
+                tools: {},
+            },
+        },
+    );
 
     // Tool handlers
     // Filter available tools based on authorized scopes
