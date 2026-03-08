@@ -99,7 +99,7 @@ async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
         if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH &&!fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+            fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
         }
 
         // Check for OAuth keys in current directory first, then in config directory
@@ -199,7 +199,7 @@ async function authenticate(scopes: string[]) {
 
                 // Store both tokens and authorized scopes for runtime filtering
                 const credentials = { tokens, scopes };
-                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2));
+                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
 
                 res.writeHead(200);
                 res.end('Authentication successful! You can close this window.');
