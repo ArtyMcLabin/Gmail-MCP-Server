@@ -48,7 +48,7 @@
     "node": ">=14.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "google-auth-library": "^9.4.1",
     "googleapis": "^129.0.0",
     "mime-types": "^3.0.1",

@@ -252,13 +252,10 @@ async function main() {
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     // Server implementation
-    const server = new Server({
-        name: "gmail",
-        version: "1.0.0",
-        capabilities: {
-            tools: {},
-        },
-    });
+    const server = new Server(
+        { name: "gmail", version: "1.0.0" },
+        { capabilities: { tools: {} } },
+    );
 
     // Tool handlers
     // Filter available tools based on authorized scopes
