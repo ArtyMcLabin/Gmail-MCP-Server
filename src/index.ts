@@ -1040,13 +1040,21 @@ async function main() {
                             filename = findAttachment(messageResponse.data.payload) || `attachment-${validatedArgs.attachmentId}`;
                         }
 
+                        // Sanitize filename to prevent path traversal
+                        filename = path.basename(filename);
+
                         // Ensure save directory exists
                         if (!fs.existsSync(savePath)) {
                             fs.mkdirSync(savePath, { recursive: true });
                         }
 
-                        // Write file
-                        const fullPath = path.join(savePath, filename);
+                        // Resolve and validate final path stays within savePath
+                        const resolvedSavePath = path.resolve(savePath);
+                        const fullPath = path.resolve(resolvedSavePath, filename);
+                        if (!fullPath.startsWith(resolvedSavePath + path.sep) && fullPath !== resolvedSavePath) {
+                            throw new Error('Invalid filename: path traversal detected');
+                        }
+
                         fs.writeFileSync(fullPath, buffer);
 
                         return {
