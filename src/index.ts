@@ -19,7 +19,8 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
+import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,13 +44,6 @@ interface GmailMessagePart {
         data?: string;
     };
     parts?: GmailMessagePart[];
-}
-
-interface EmailAttachment {
-    id: string;
-    filename: string;
-    mimeType: string;
-    size: number;
 }
 
 interface EmailContent {
@@ -93,6 +87,46 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
 
     // Return both plain text and HTML content
     return { text: textContent, html: htmlContent };
+}
+
+/**
+ * Extract common headers from Gmail message payload
+ */
+function extractHeaders(payload: any): { subject: string; from: string; to: string; date: string; rfcMessageId: string } {
+    const headers = payload?.headers || [];
+    const getHeader = (name: string) =>
+        headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
+    return {
+        subject: getHeader("subject"),
+        from: getHeader("from"),
+        to: getHeader("to"),
+        date: getHeader("date"),
+        rfcMessageId: getHeader("message-id"),
+    };
+}
+
+/**
+ * Extract attachments from Gmail message payload
+ */
+function extractAttachments(payload: GmailMessagePart): EmailAttachment[] {
+    const attachments: EmailAttachment[] = [];
+
+    function processAttachmentParts(part: GmailMessagePart) {
+        if (part.body && part.body.attachmentId) {
+            attachments.push({
+                id: part.body.attachmentId,
+                filename: part.filename || `attachment-${part.body.attachmentId}`,
+                mimeType: part.mimeType || "application/octet-stream",
+                size: part.body.size || 0,
+            });
+        }
+        if (part.parts) {
+            part.parts.forEach((subpart: GmailMessagePart) => processAttachmentParts(subpart));
+        }
+    }
+
+    processAttachmentParts(payload);
+    return attachments;
 }
 
 async function loadCredentials() {
@@ -501,48 +535,15 @@ async function main() {
                         format: 'full',
                     });
 
-                    const headers = response.data.payload?.headers || [];
-                    const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '';
-                    const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || '';
-                    const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
-                    const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
-                    const rfcMessageId = headers.find(h => h.name?.toLowerCase() === 'message-id')?.value || '';
+                    const { subject, from, to, date, rfcMessageId } = extractHeaders(response.data.payload);
                     const threadId = response.data.threadId || '';
-
-                    // Extract email content using the recursive function
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
+                    const attachments = extractAttachments(response.data.payload as GmailMessagePart);
 
                     // Use plain text content if available, otherwise use HTML content
-                    // (optionally, you could implement HTML-to-text conversion here)
-                    let body = text || html || '';
-
-                    // If we only have HTML content, add a note for the user
+                    const body = text || html || '';
                     const contentTypeNote = !text && html ?
                         '[Note: This email is HTML-formatted. Plain text version not available.]\n\n' : '';
-
-                    // Get attachment information
-                    const attachments: EmailAttachment[] = [];
-                    const processAttachmentParts = (part: GmailMessagePart, path: string = '') => {
-                        if (part.body && part.body.attachmentId) {
-                            const filename = part.filename || `attachment-${part.body.attachmentId}`;
-                            attachments.push({
-                                id: part.body.attachmentId,
-                                filename: filename,
-                                mimeType: part.mimeType || 'application/octet-stream',
-                                size: part.body.size || 0
-                            });
-                        }
-
-                        if (part.parts) {
-                            part.parts.forEach((subpart: GmailMessagePart) =>
-                                processAttachmentParts(subpart, `${path}/parts`)
-                            );
-                        }
-                    };
-
-                    if (response.data.payload) {
-                        processAttachmentParts(response.data.payload as GmailMessagePart);
-                    }
 
                     // Add attachment info to output if any are present
                     const attachmentInfo = attachments.length > 0 ?
@@ -596,6 +597,89 @@ async function main() {
                             },
                         ],
                     };
+                }
+
+                case "download_email": {
+                    const validatedArgs = DownloadEmailSchema.parse(args);
+                    const { messageId, savePath, format } = validatedArgs;
+
+                    try {
+                        // Ensure save directory exists
+                        if (!fs.existsSync(savePath)) {
+                            fs.mkdirSync(savePath, { recursive: true });
+                        }
+
+                        // Always fetch full message for metadata (needed for attachments list)
+                        const fullResponse = await gmail.users.messages.get({
+                            userId: "me",
+                            id: messageId,
+                            format: "full",
+                        });
+
+                        const { subject, from, date } = extractHeaders(fullResponse.data.payload);
+                        const attachments = extractAttachments(fullResponse.data.payload as GmailMessagePart);
+
+                        let content: string;
+
+                        if (format === "eml") {
+                            // For EML format, fetch raw RFC822 message
+                            const rawResponse = await gmail.users.messages.get({
+                                userId: "me",
+                                id: messageId,
+                                format: "raw",
+                            });
+                            content = Buffer.from(rawResponse.data.raw || "", "base64url").toString("utf-8");
+                        } else {
+                            // Extract email content for json/txt/html
+                            const emailContent = extractEmailContent(fullResponse.data.payload as GmailMessagePart || {});
+
+                            if (format === "json") {
+                                const jsonData = gmailMessageToJson(fullResponse.data, emailContent, attachments);
+                                content = JSON.stringify(jsonData, null, 2);
+                            } else if (format === "txt") {
+                                content = emailToTxt(fullResponse.data, emailContent, attachments);
+                            } else {
+                                // html - just return the raw HTML content
+                                content = emailToHtml(emailContent);
+                            }
+                        }
+
+                        // Write file
+                        const filename = `${messageId}.${format}`;
+                        const fullPath = path.join(savePath, filename);
+                        fs.writeFileSync(fullPath, content, "utf-8");
+                        const stats = fs.statSync(fullPath);
+
+                        // Return metadata with attachments
+                        const result = {
+                            status: "saved",
+                            path: fullPath,
+                            size: stats.size,
+                            messageId,
+                            subject,
+                            from,
+                            date,
+                            attachments,
+                        };
+
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: JSON.stringify(result, null, 2),
+                                },
+                            ],
+                        };
+                    } catch (error: any) {
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `Failed to download email: ${error.message}`,
+                                },
+                            ],
+                        };
+                    }
                 }
 
                 // Updated implementation for the modify_email handler

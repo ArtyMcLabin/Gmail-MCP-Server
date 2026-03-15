@@ -49,6 +49,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "email-addresses": "^5.0.0",
     "google-auth-library": "^9.4.1",
     "googleapis": "^129.0.0",
     "mime-types": "^3.0.1",

@@ -124,6 +124,13 @@ export const DownloadAttachmentSchema = z.object({
   savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory)"),
 });
 
+export const DownloadEmailSchema = z.object({
+  messageId: z.string().describe("ID of the email message to download"),
+  savePath: z.string().describe("Directory path to save the email file"),
+  format: z.enum(['json', 'eml', 'txt', 'html']).optional().default('json')
+    .describe("Output format: json (structured data), eml (raw RFC822), txt (plain text), html (formatted HTML)"),
+});
+
 // Thread-level schemas
 export const GetThreadSchema = z.object({
   threadId: z.string().describe("ID of the email thread to retrieve"),
@@ -213,6 +220,13 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: GetInboxWithThreadsSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
     annotations: { title: "Get Inbox with Threads", readOnlyHint: true },
+  },
+  {
+    name: "download_email",
+    description: "Downloads an email to a file in various formats (json, eml, txt, html). Returns metadata only - useful for saving emails without consuming context.",
+    schema: DownloadEmailSchema,
+    scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Download Email", readOnlyHint: true },
   },
 
   // Email write operations
