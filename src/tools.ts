@@ -151,11 +151,20 @@ export const ReplyAllSchema = z.object({
 });
 
 // Tool definition type
+export interface ToolAnnotations {
+  title: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
   schema: z.ZodType<any>;
   scopes: string[]; // Any of these scopes grants access
+  annotations: ToolAnnotations;
 }
 
 // Tool registry with scope requirements
@@ -166,18 +175,21 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Retrieves the content of a specific email",
     schema: ReadEmailSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Read Email", readOnlyHint: true },
   },
   {
     name: "search_emails",
     description: "Searches for emails using Gmail search syntax",
     schema: SearchEmailsSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Search Emails", readOnlyHint: true },
   },
   {
     name: "download_attachment",
     description: "Downloads an email attachment to a specified location",
     schema: DownloadAttachmentSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Download Attachment", readOnlyHint: true },
   },
 
   // Thread-level operations
@@ -206,36 +218,42 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Sends a new email",
     schema: SendEmailSchema,
     scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
+    annotations: { title: "Send Email", destructiveHint: false },
   },
   {
     name: "draft_email",
     description: "Draft a new email",
     schema: SendEmailSchema,
     scopes: ["gmail.modify", "gmail.compose"],
+    annotations: { title: "Draft Email", destructiveHint: false },
   },
   {
     name: "modify_email",
     description: "Modifies email labels (move to different folders)",
     schema: ModifyEmailSchema,
     scopes: ["gmail.modify"],
+    annotations: { title: "Modify Email", destructiveHint: true, idempotentHint: true },
   },
   {
     name: "delete_email",
     description: "Permanently deletes an email",
     schema: DeleteEmailSchema,
     scopes: ["gmail.modify"],
+    annotations: { title: "Delete Email", destructiveHint: true },
   },
   {
     name: "batch_modify_emails",
     description: "Modifies labels for multiple emails in batches",
     schema: BatchModifyEmailsSchema,
     scopes: ["gmail.modify"],
+    annotations: { title: "Batch Modify Emails", destructiveHint: true, idempotentHint: true },
   },
   {
     name: "batch_delete_emails",
     description: "Permanently deletes multiple emails in batches",
     schema: BatchDeleteEmailsSchema,
     scopes: ["gmail.modify"],
+    annotations: { title: "Batch Delete Emails", destructiveHint: true },
   },
 
   // Label operations
@@ -244,30 +262,35 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Retrieves all available Gmail labels",
     schema: ListEmailLabelsSchema,
     scopes: ["gmail.readonly", "gmail.modify", "gmail.labels"],
+    annotations: { title: "List Email Labels", readOnlyHint: true },
   },
   {
     name: "create_label",
     description: "Creates a new Gmail label",
     schema: CreateLabelSchema,
     scopes: ["gmail.modify", "gmail.labels"],
+    annotations: { title: "Create Label", destructiveHint: false },
   },
   {
     name: "update_label",
     description: "Updates an existing Gmail label",
     schema: UpdateLabelSchema,
     scopes: ["gmail.modify", "gmail.labels"],
+    annotations: { title: "Update Label", destructiveHint: true, idempotentHint: true },
   },
   {
     name: "delete_label",
     description: "Deletes a Gmail label",
     schema: DeleteLabelSchema,
     scopes: ["gmail.modify", "gmail.labels"],
+    annotations: { title: "Delete Label", destructiveHint: true },
   },
   {
     name: "get_or_create_label",
     description: "Gets an existing label by name or creates it if it doesn't exist",
     schema: GetOrCreateLabelSchema,
     scopes: ["gmail.modify", "gmail.labels"],
+    annotations: { title: "Get or Create Label", destructiveHint: false, idempotentHint: true },
   },
 
   // Filter operations (require settings scope)
@@ -276,30 +299,35 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Retrieves all Gmail filters",
     schema: ListFiltersSchema,
     scopes: ["gmail.settings.basic"],
+    annotations: { title: "List Filters", readOnlyHint: true },
   },
   {
     name: "get_filter",
     description: "Gets details of a specific Gmail filter",
     schema: GetFilterSchema,
     scopes: ["gmail.settings.basic"],
+    annotations: { title: "Get Filter", readOnlyHint: true },
   },
   {
     name: "create_filter",
     description: "Creates a new Gmail filter with custom criteria and actions",
     schema: CreateFilterSchema,
     scopes: ["gmail.settings.basic"],
+    annotations: { title: "Create Filter", destructiveHint: false },
   },
   {
     name: "delete_filter",
     description: "Deletes a Gmail filter",
     schema: DeleteFilterSchema,
     scopes: ["gmail.settings.basic"],
+    annotations: { title: "Delete Filter", destructiveHint: true },
   },
   {
     name: "create_filter_from_template",
     description: "Creates a filter using a pre-defined template for common scenarios",
     schema: CreateFilterFromTemplateSchema,
     scopes: ["gmail.settings.basic"],
+    annotations: { title: "Create Filter from Template", destructiveHint: false },
   },
 
   // Reply-all operation
@@ -308,6 +336,7 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Replies to all recipients of an email. Automatically fetches the original email to build the recipient list (To, CC) and sets proper threading headers.",
     schema: ReplyAllSchema,
     scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
+    annotations: { title: "Reply All", destructiveHint: false },
   },
 ];
 
@@ -317,6 +346,7 @@ export function toMcpTools(tools: ToolDefinition[]) {
     name: tool.name,
     description: tool.description,
     inputSchema: zodToJsonSchema(tool.schema),
+    annotations: tool.annotations,
   }));
 }
 
