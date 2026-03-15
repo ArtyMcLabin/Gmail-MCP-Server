@@ -198,18 +198,21 @@ export const toolDefinitions: ToolDefinition[] = [
     description: "Retrieves all messages in an email thread in one call. Returns messages ordered chronologically (oldest first) with full content, headers, labels, and attachment metadata.",
     schema: GetThreadSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Get Thread", readOnlyHint: true },
   },
   {
     name: "list_inbox_threads",
     description: "Lists email threads matching a query (default: inbox). Returns thread-level view with snippet, message count, and latest message metadata.",
     schema: ListInboxThreadsSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "List Inbox Threads", readOnlyHint: true },
   },
   {
     name: "get_inbox_with_threads",
     description: "Convenience tool that lists threads and optionally expands each with full message content. One call returns the full inbox with complete thread bodies.",
     schema: GetInboxWithThreadsSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Get Inbox with Threads", readOnlyHint: true },
   },
 
   // Email write operations
