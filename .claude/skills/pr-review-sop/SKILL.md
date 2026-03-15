@@ -31,6 +31,7 @@ user-invocable: false
 - Explicitly report verdict: "Security audit: **PASS**" or "Security audit: **FAIL** — [findings]"
 - Never present a PR review to user without a completed security audit.
 - For FAIL verdicts: list all findings with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO).
+- **Local MCP threat model:** This is a local stdio MCP server (user self-hosts on own PC, not remote/hosted). The LLM client already has full filesystem/shell access. Path traversal, filename injection, and local XSS are NOT security issues in this context — the "attacker" (LLM) already has more powerful tools (Bash, Write). Only flag issues that represent actual risk in the local threat model (e.g., credential leaks to third parties, network-exposed endpoints, dependency supply chain). Do NOT flag local filesystem operations as security vulnerabilities.
 
 ### Step 4: Code Review
 - Check for merge conflicts, build breakage, test failures.
@@ -45,8 +46,14 @@ user-invocable: false
 1. Fetch PR branch locally: `git fetch origin pull/{N}/head:pr-{N}`
 2. Checkout `experimental` and merge: `git merge pr-{N} --no-edit`
 3. Fix any build/test breakage caused by the merge.
-4. Commit fixes, push experimental.
-5. Comment on PR explaining the merge + security audit result. Close PR.
+4. **Post-merge patching:** If the PR has minor quality issues (wrong indentation, extra lockfiles, missing annotations for new tools, etc.), fix them ourselves in the same commit rather than sending back to the contributor. Avoid back-and-forth on trivial fixes.
+5. Commit fixes, push experimental.
+6. Comment on PR explaining the merge + security audit result + any post-merge fixes applied. Close PR.
+
+## Staleness Policy
+
+- PRs with "help wanted" label: keep open for up to 6 months. Close if no community participation by then.
+- Stale PRs without label: assess on a case-by-case basis.
 
 ## Issue Review (Same Rules Apply)
 
@@ -58,10 +65,16 @@ When scanning issues:
 
 ## Security Standards (This Project)
 
-Established security patterns from commits `95071e7` and `208ce00`:
-- Path traversal protection on filesystem ops (`path.basename()`, resolved path validation)
+**Threat model: local stdio MCP server.** User self-hosts on own machine. LLM client already has full filesystem/shell access. Security audits must account for this context.
+
+Established hardening from commits `95071e7` and `208ce00`:
 - CRLF header injection prevention
 - OAuth callback localhost binding
 - Credential file permission hardening
+- Dependency security (npm audit)
 
-All new code touching filesystem paths or user-controlled input MUST follow these patterns.
+**NOT security issues for this project** (local MCP context):
+- Path traversal on filesystem operations (LLM already has Bash/Write)
+- Filename injection (same reasoning)
+- Local XSS in exported files (user opens their own files)
+- Symlink following (local user's filesystem)
