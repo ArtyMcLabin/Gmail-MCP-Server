@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { lookup as mimeLookup } from 'mime-types';
 import nodemailer from 'nodemailer';
 
@@ -27,6 +28,33 @@ export const validateEmail = (email: string): boolean => {
  */
 function sanitizeHeaderValue(value: string): string {
     return value.replace(/[\r\n\0]/g, '');
+}
+
+/**
+ * Validate that an attachment file path is allowed.
+ *
+ * Requires GMAIL_ATTACHMENT_DIR to be set. If unset, attachments are disabled.
+ * The resolved path must fall within the configured directory — preventing
+ * prompt-injection attacks that attempt to exfiltrate arbitrary files.
+ */
+function validateAttachmentPath(filePath: string): void {
+    const allowedDir = process.env.GMAIL_ATTACHMENT_DIR;
+    if (!allowedDir) {
+        throw new Error(
+            'Attachments are disabled. Set the GMAIL_ATTACHMENT_DIR environment variable ' +
+            'to the directory attachments may be read from (e.g. ~/Downloads).'
+        );
+    }
+    const allowedResolved = path.resolve(allowedDir.replace(/^~/, os.homedir()));
+    const fileResolved = path.resolve(filePath.replace(/^~/, os.homedir()));
+    if (!fileResolved.startsWith(allowedResolved + path.sep)) {
+        throw new Error(
+            `Attachment path not allowed: "${fileResolved}" is outside the permitted directory "${allowedResolved}".`
+        );
+    }
+    if (!fs.existsSync(fileResolved)) {
+        throw new Error(`Attachment file does not exist: ${fileResolved}`);
+    }
 }
 
 export function createEmailMessage(validatedArgs: any): string {
@@ -132,15 +160,12 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
     // Prepare attachments for nodemailer
     const attachments = [];
     for (const filePath of validatedArgs.attachments) {
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File does not exist: ${filePath}`);
-        }
-        
-        const fileName = path.basename(filePath);
-        
+        validateAttachmentPath(filePath);
+        const resolvedPath = path.resolve(filePath.replace(/^~/, os.homedir()));
+        const fileName = path.basename(resolvedPath);
         attachments.push({
             filename: fileName,
-            path: filePath
+            path: resolvedPath
         });
     }
 
