@@ -7,8 +7,6 @@ import {
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { google } from 'googleapis';
-import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
@@ -19,6 +17,10 @@ import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
+import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
+import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema } from "./tools.js";
+import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,13 +46,6 @@ interface GmailMessagePart {
     parts?: GmailMessagePart[];
 }
 
-interface EmailAttachment {
-    id: string;
-    filename: string;
-    mimeType: string;
-    size: number;
-}
-
 interface EmailContent {
     text: string;
     html: string;
@@ -58,6 +53,7 @@ interface EmailContent {
 
 // OAuth2 configuration
 let oauth2Client: OAuth2Client;
+let authorizedScopes: string[] = DEFAULT_SCOPES;
 
 /**
  * Recursively extract email body content from MIME message parts
@@ -93,11 +89,51 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
     return { text: textContent, html: htmlContent };
 }
 
+/**
+ * Extract common headers from Gmail message payload
+ */
+function extractHeaders(payload: any): { subject: string; from: string; to: string; date: string; rfcMessageId: string } {
+    const headers = payload?.headers || [];
+    const getHeader = (name: string) =>
+        headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
+    return {
+        subject: getHeader("subject"),
+        from: getHeader("from"),
+        to: getHeader("to"),
+        date: getHeader("date"),
+        rfcMessageId: getHeader("message-id"),
+    };
+}
+
+/**
+ * Extract attachments from Gmail message payload
+ */
+function extractAttachments(payload: GmailMessagePart): EmailAttachment[] {
+    const attachments: EmailAttachment[] = [];
+
+    function processAttachmentParts(part: GmailMessagePart) {
+        if (part.body && part.body.attachmentId) {
+            attachments.push({
+                id: part.body.attachmentId,
+                filename: part.filename || `attachment-${part.body.attachmentId}`,
+                mimeType: part.mimeType || "application/octet-stream",
+                size: part.body.size || 0,
+            });
+        }
+        if (part.parts) {
+            part.parts.forEach((subpart: GmailMessagePart) => processAttachmentParts(subpart));
+        }
+    }
+
+    processAttachmentParts(payload);
+    return attachments;
+}
+
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH &&!fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        if (!process.env.GMAIL_OAUTH_PATH && !process.env.GMAIL_CREDENTIALS_PATH && !fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
         }
 
         // Check for OAuth keys in current directory first, then in config directory
@@ -123,9 +159,13 @@ async function loadCredentials() {
             process.exit(1);
         }
 
-        const callback = process.argv[2] === 'auth' && process.argv[3] 
-        ? process.argv[3] 
-        : "http://localhost:3000/oauth2callback";
+        // Parse callback URL from args (must be a URL, not a flag)
+        // Supports: node index.js auth https://example.com/callback
+        // Or: node index.js auth --scopes=gmail.readonly (uses default callback)
+        const callbackArg = process.argv.find(arg =>
+            arg.startsWith('http://') || arg.startsWith('https://')
+        );
+        const callback = callbackArg || "http://localhost:3000/oauth2callback";
 
         oauth2Client = new OAuth2Client(
             keys.client_id,
@@ -135,7 +175,21 @@ async function loadCredentials() {
 
         if (fs.existsSync(CREDENTIALS_PATH)) {
             const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-            oauth2Client.setCredentials(credentials);
+
+            // Credentials file structure (v1.2.0+):
+            //   { "tokens": { access_token, refresh_token, ... }, "scopes": ["gmail.readonly", ...] }
+            //
+            // Legacy structure (pre-v1.2.0):
+            //   { access_token, refresh_token, ... }
+            //
+            // We support both formats for backwards compatibility. Users with legacy
+            // credentials will get DEFAULT_SCOPES (full access) until they re-authenticate.
+            const tokens = credentials.tokens || credentials;
+            oauth2Client.setCredentials(tokens);
+
+            if (credentials.scopes) {
+                authorizedScopes = credentials.scopes;
+            }
         }
     } catch (error) {
         console.error('Error loading credentials:', error);
@@ -143,19 +197,20 @@ async function loadCredentials() {
     }
 }
 
-async function authenticate() {
+async function authenticate(scopes: string[]) {
     const server = http.createServer();
-    server.listen(3000);
+    server.listen(3000, '127.0.0.1');
+
+    // Convert shorthand scope names (e.g., "gmail.readonly") to full Google API URLs
+    const scopeUrls = scopeNamesToUrls(scopes);
 
     return new Promise<void>((resolve, reject) => {
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
-            scope: [
-                'https://www.googleapis.com/auth/gmail.modify',
-                'https://www.googleapis.com/auth/gmail.settings.basic'
-            ],
+            scope: scopeUrls,
         });
 
+        console.log('Requesting scopes:', scopes.join(', '));
         console.log('Please visit this URL to authenticate:', authUrl);
         open(authUrl);
 
@@ -175,10 +230,14 @@ async function authenticate() {
             try {
                 const { tokens } = await oauth2Client.getToken(code);
                 oauth2Client.setCredentials(tokens);
-                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(tokens));
+
+                // Store both tokens and authorized scopes for runtime filtering
+                const credentials = { tokens, scopes };
+                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
 
                 res.writeHead(200);
                 res.end('Authentication successful! You can close this window.');
+                console.log('Credentials saved with scopes:', scopes.join(', '));
                 server.close();
                 resolve();
             } catch (error) {
@@ -190,140 +249,35 @@ async function authenticate() {
     });
 }
 
-// Schema definitions
-const SendEmailSchema = z.object({
-    to: z.array(z.string()).describe("List of recipient email addresses"),
-    subject: z.string().describe("Email subject"),
-    body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
-    htmlBody: z.string().optional().describe("HTML version of the email body"),
-    mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
-    cc: z.array(z.string()).optional().describe("List of CC recipients"),
-    bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
-    threadId: z.string().optional().describe("Thread ID to reply to"),
-    inReplyTo: z.string().optional().describe("Message ID being replied to"),
-    attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
-});
-
-const ReadEmailSchema = z.object({
-    messageId: z.string().describe("ID of the email message to retrieve"),
-});
-
-const SearchEmailsSchema = z.object({
-    query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
-    maxResults: z.number().optional().describe("Maximum number of results to return"),
-});
-
-// Updated schema to include removeLabelIds
-const ModifyEmailSchema = z.object({
-    messageId: z.string().describe("ID of the email message to modify"),
-    labelIds: z.array(z.string()).optional().describe("List of label IDs to apply"),
-    addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to the message"),
-    removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from the message"),
-});
-
-const DeleteEmailSchema = z.object({
-    messageId: z.string().describe("ID of the email message to delete"),
-});
-
-// New schema for listing email labels
-const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
-
-// Label management schemas
-const CreateLabelSchema = z.object({
-    name: z.string().describe("Name for the new label"),
-    messageListVisibility: z.enum(['show', 'hide']).optional().describe("Whether to show or hide the label in the message list"),
-    labelListVisibility: z.enum(['labelShow', 'labelShowIfUnread', 'labelHide']).optional().describe("Visibility of the label in the label list"),
-}).describe("Creates a new Gmail label");
-
-const UpdateLabelSchema = z.object({
-    id: z.string().describe("ID of the label to update"),
-    name: z.string().optional().describe("New name for the label"),
-    messageListVisibility: z.enum(['show', 'hide']).optional().describe("Whether to show or hide the label in the message list"),
-    labelListVisibility: z.enum(['labelShow', 'labelShowIfUnread', 'labelHide']).optional().describe("Visibility of the label in the label list"),
-}).describe("Updates an existing Gmail label");
-
-const DeleteLabelSchema = z.object({
-    id: z.string().describe("ID of the label to delete"),
-}).describe("Deletes a Gmail label");
-
-const GetOrCreateLabelSchema = z.object({
-    name: z.string().describe("Name of the label to get or create"),
-    messageListVisibility: z.enum(['show', 'hide']).optional().describe("Whether to show or hide the label in the message list"),
-    labelListVisibility: z.enum(['labelShow', 'labelShowIfUnread', 'labelHide']).optional().describe("Visibility of the label in the label list"),
-}).describe("Gets an existing label by name or creates it if it doesn't exist");
-
-// Schemas for batch operations
-const BatchModifyEmailsSchema = z.object({
-    messageIds: z.array(z.string()).describe("List of message IDs to modify"),
-    addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to all messages"),
-    removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from all messages"),
-    batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
-});
-
-const BatchDeleteEmailsSchema = z.object({
-    messageIds: z.array(z.string()).describe("List of message IDs to delete"),
-    batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
-});
-
-// Filter management schemas
-const CreateFilterSchema = z.object({
-    criteria: z.object({
-        from: z.string().optional().describe("Sender email address to match"),
-        to: z.string().optional().describe("Recipient email address to match"),
-        subject: z.string().optional().describe("Subject text to match"),
-        query: z.string().optional().describe("Gmail search query (e.g., 'has:attachment')"),
-        negatedQuery: z.string().optional().describe("Text that must NOT be present"),
-        hasAttachment: z.boolean().optional().describe("Whether to match emails with attachments"),
-        excludeChats: z.boolean().optional().describe("Whether to exclude chat messages"),
-        size: z.number().optional().describe("Email size in bytes"),
-        sizeComparison: z.enum(['unspecified', 'smaller', 'larger']).optional().describe("Size comparison operator")
-    }).describe("Criteria for matching emails"),
-    action: z.object({
-        addLabelIds: z.array(z.string()).optional().describe("Label IDs to add to matching emails"),
-        removeLabelIds: z.array(z.string()).optional().describe("Label IDs to remove from matching emails"),
-        forward: z.string().optional().describe("Email address to forward matching emails to")
-    }).describe("Actions to perform on matching emails")
-}).describe("Creates a new Gmail filter");
-
-const ListFiltersSchema = z.object({}).describe("Retrieves all Gmail filters");
-
-const GetFilterSchema = z.object({
-    filterId: z.string().describe("ID of the filter to retrieve")
-}).describe("Gets details of a specific Gmail filter");
-
-const DeleteFilterSchema = z.object({
-    filterId: z.string().describe("ID of the filter to delete")
-}).describe("Deletes a Gmail filter");
-
-const CreateFilterFromTemplateSchema = z.object({
-    template: z.enum(['fromSender', 'withSubject', 'withAttachments', 'largeEmails', 'containingText', 'mailingList']).describe("Pre-defined filter template to use"),
-    parameters: z.object({
-        senderEmail: z.string().optional().describe("Sender email (for fromSender template)"),
-        subjectText: z.string().optional().describe("Subject text (for withSubject template)"),
-        searchText: z.string().optional().describe("Text to search for (for containingText template)"),
-        listIdentifier: z.string().optional().describe("Mailing list identifier (for mailingList template)"),
-        sizeInBytes: z.number().optional().describe("Size threshold in bytes (for largeEmails template)"),
-        labelIds: z.array(z.string()).optional().describe("Label IDs to apply"),
-        archive: z.boolean().optional().describe("Whether to archive (skip inbox)"),
-        markAsRead: z.boolean().optional().describe("Whether to mark as read"),
-        markImportant: z.boolean().optional().describe("Whether to mark as important")
-    }).describe("Template-specific parameters")
-}).describe("Creates a filter using a pre-defined template");
-
-const DownloadAttachmentSchema = z.object({
-    messageId: z.string().describe("ID of the email message containing the attachment"),
-    attachmentId: z.string().describe("ID of the attachment to download"),
-    filename: z.string().optional().describe("Filename to save the attachment as (if not provided, uses original filename)"),
-    savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory)"),
-});
-
-
 // Main function
 async function main() {
     await loadCredentials();
 
     if (process.argv[2] === 'auth') {
-        await authenticate();
+        // Parse --scopes flag from CLI arguments
+        // Usage: node dist/index.js auth --scopes=<scope1,scope2,...>
+        // Example: node dist/index.js auth --scopes=gmail.readonly
+        // Example: node dist/index.js auth --scopes=gmail.readonly,gmail.settings.basic
+        const scopesArg = process.argv.find(arg => arg.startsWith('--scopes='));
+        let scopes = DEFAULT_SCOPES;
+
+        if (scopesArg) {
+            const scopesValue = scopesArg.slice('--scopes='.length);
+            scopes = parseScopes(scopesValue);
+            const validation = validateScopes(scopes);
+
+            if (!validation.valid) {
+                console.error('Error: Invalid scope(s):', validation.invalid.join(', '));
+                console.error('Available scopes:', getAvailableScopeNames().join(', '));
+                process.exit(1);
+            }
+        } else {
+            console.log('No --scopes flag specified, using defaults:', DEFAULT_SCOPES.join(', '));
+            console.log('Tip: Use --scopes=gmail.readonly for read-only access');
+            console.log('Available scopes:', getAvailableScopeNames().join(', '));
+        }
+
+        await authenticate(scopes);
         console.log('Authentication completed successfully');
         process.exit(0);
     }
@@ -332,122 +286,90 @@ async function main() {
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
     // Server implementation
-    const server = new Server({
-        name: "gmail",
-        version: "1.0.0",
-        capabilities: {
-            tools: {},
+    const server = new Server(
+        {
+            name: "gmail",
+            version: "1.0.0",
         },
-    });
+        {
+            capabilities: {
+                tools: {},
+            },
+        },
+    );
 
     // Tool handlers
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: [
-            {
-                name: "send_email",
-                description: "Sends a new email",
-                inputSchema: zodToJsonSchema(SendEmailSchema),
-            },
-            {
-                name: "draft_email",
-                description: "Draft a new email",
-                inputSchema: zodToJsonSchema(SendEmailSchema),
-            },
-            {
-                name: "read_email",
-                description: "Retrieves the content of a specific email",
-                inputSchema: zodToJsonSchema(ReadEmailSchema),
-            },
-            {
-                name: "search_emails",
-                description: "Searches for emails using Gmail search syntax",
-                inputSchema: zodToJsonSchema(SearchEmailsSchema),
-            },
-            {
-                name: "modify_email",
-                description: "Modifies email labels (move to different folders)",
-                inputSchema: zodToJsonSchema(ModifyEmailSchema),
-            },
-            {
-                name: "delete_email",
-                description: "Permanently deletes an email",
-                inputSchema: zodToJsonSchema(DeleteEmailSchema),
-            },
-            {
-                name: "list_email_labels",
-                description: "Retrieves all available Gmail labels",
-                inputSchema: zodToJsonSchema(ListEmailLabelsSchema),
-            },
-            {
-                name: "batch_modify_emails",
-                description: "Modifies labels for multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchModifyEmailsSchema),
-            },
-            {
-                name: "batch_delete_emails",
-                description: "Permanently deletes multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchDeleteEmailsSchema),
-            },
-            {
-                name: "create_label",
-                description: "Creates a new Gmail label",
-                inputSchema: zodToJsonSchema(CreateLabelSchema),
-            },
-            {
-                name: "update_label",
-                description: "Updates an existing Gmail label",
-                inputSchema: zodToJsonSchema(UpdateLabelSchema),
-            },
-            {
-                name: "delete_label",
-                description: "Deletes a Gmail label",
-                inputSchema: zodToJsonSchema(DeleteLabelSchema),
-            },
-            {
-                name: "get_or_create_label",
-                description: "Gets an existing label by name or creates it if it doesn't exist",
-                inputSchema: zodToJsonSchema(GetOrCreateLabelSchema),
-            },
-            {
-                name: "create_filter",
-                description: "Creates a new Gmail filter with custom criteria and actions",
-                inputSchema: zodToJsonSchema(CreateFilterSchema),
-            },
-            {
-                name: "list_filters",
-                description: "Retrieves all Gmail filters",
-                inputSchema: zodToJsonSchema(ListFiltersSchema),
-            },
-            {
-                name: "get_filter",
-                description: "Gets details of a specific Gmail filter",
-                inputSchema: zodToJsonSchema(GetFilterSchema),
-            },
-            {
-                name: "delete_filter",
-                description: "Deletes a Gmail filter",
-                inputSchema: zodToJsonSchema(DeleteFilterSchema),
-            },
-            {
-                name: "create_filter_from_template",
-                description: "Creates a filter using a pre-defined template for common scenarios",
-                inputSchema: zodToJsonSchema(CreateFilterFromTemplateSchema),
-            },
-            {
-                name: "download_attachment",
-                description: "Downloads an email attachment to a specified location",
-                inputSchema: zodToJsonSchema(DownloadAttachmentSchema),
-            },
-        ],
-    }))
+    // Filter available tools based on authorized scopes
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+        const availableTools = toolDefinitions.filter(tool =>
+            hasScope(authorizedScopes, tool.scopes)
+        );
+        return { tools: toMcpTools(availableTools) };
+    });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { name, arguments: args } = request.params;
 
+        // Verify the tool is authorized for the current scopes
+        // This guards against direct tool calls that bypass ListTools
+        const toolDef = getToolByName(name);
+        if (!toolDef || !hasScope(authorizedScopes, toolDef.scopes)) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error: Tool "${name}" is not available. You may need to re-authenticate with additional scopes.`,
+                }],
+            };
+        }
+
         async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
             let message: string;
-            
+
             try {
+                // Auto-resolve threading headers when threadId is provided but inReplyTo is missing
+                if (validatedArgs.threadId && !validatedArgs.inReplyTo) {
+                    try {
+                        const threadResponse = await gmail.users.threads.get({
+                            userId: 'me',
+                            id: validatedArgs.threadId,
+                            format: 'metadata',
+                            metadataHeaders: ['Message-ID'],
+                        });
+
+                        const threadMessages = threadResponse.data.messages || [];
+                        if (threadMessages.length > 0) {
+                            // Collect all Message-ID values for the References chain
+                            const allMessageIds: string[] = [];
+                            for (const msg of threadMessages) {
+                                const msgHeaders = msg.payload?.headers || [];
+                                const messageIdHeader = msgHeaders.find(
+                                    (h) => h.name?.toLowerCase() === 'message-id'
+                                );
+                                if (messageIdHeader?.value) {
+                                    allMessageIds.push(messageIdHeader.value);
+                                }
+                            }
+
+                            // Last message's Message-ID becomes In-Reply-To
+                            const lastMessage = threadMessages[threadMessages.length - 1];
+                            const lastHeaders = lastMessage.payload?.headers || [];
+                            const lastMessageId = lastHeaders.find(
+                                (h) => h.name?.toLowerCase() === 'message-id'
+                            )?.value;
+
+                            if (lastMessageId) {
+                                validatedArgs.inReplyTo = lastMessageId;
+                            }
+                            if (allMessageIds.length > 0) {
+                                validatedArgs.references = allMessageIds.join(' ');
+                            }
+                        }
+                    } catch (threadError: any) {
+                        console.warn(`Warning: Could not fetch thread ${validatedArgs.threadId} for header resolution: ${threadError.message}`);
+                        // Continue without threading headers - degraded but not broken
+                    }
+                }
+
                 // Check if we have attachments
                 if (validatedArgs.attachments && validatedArgs.attachments.length > 0) {
                     // Use Nodemailer to create properly formatted RFC822 message
@@ -613,47 +535,15 @@ async function main() {
                         format: 'full',
                     });
 
-                    const headers = response.data.payload?.headers || [];
-                    const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '';
-                    const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || '';
-                    const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
-                    const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
+                    const { subject, from, to, date, rfcMessageId } = extractHeaders(response.data.payload);
                     const threadId = response.data.threadId || '';
-
-                    // Extract email content using the recursive function
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
+                    const attachments = extractAttachments(response.data.payload as GmailMessagePart);
 
                     // Use plain text content if available, otherwise use HTML content
-                    // (optionally, you could implement HTML-to-text conversion here)
-                    let body = text || html || '';
-
-                    // If we only have HTML content, add a note for the user
+                    const body = text || html || '';
                     const contentTypeNote = !text && html ?
                         '[Note: This email is HTML-formatted. Plain text version not available.]\n\n' : '';
-
-                    // Get attachment information
-                    const attachments: EmailAttachment[] = [];
-                    const processAttachmentParts = (part: GmailMessagePart, path: string = '') => {
-                        if (part.body && part.body.attachmentId) {
-                            const filename = part.filename || `attachment-${part.body.attachmentId}`;
-                            attachments.push({
-                                id: part.body.attachmentId,
-                                filename: filename,
-                                mimeType: part.mimeType || 'application/octet-stream',
-                                size: part.body.size || 0
-                            });
-                        }
-
-                        if (part.parts) {
-                            part.parts.forEach((subpart: GmailMessagePart) =>
-                                processAttachmentParts(subpart, `${path}/parts`)
-                            );
-                        }
-                    };
-
-                    if (response.data.payload) {
-                        processAttachmentParts(response.data.payload as GmailMessagePart);
-                    }
 
                     // Add attachment info to output if any are present
                     const attachmentInfo = attachments.length > 0 ?
@@ -664,7 +554,7 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
                             },
                         ],
                     };
@@ -707,6 +597,89 @@ async function main() {
                             },
                         ],
                     };
+                }
+
+                case "download_email": {
+                    const validatedArgs = DownloadEmailSchema.parse(args);
+                    const { messageId, savePath, format } = validatedArgs;
+
+                    try {
+                        // Ensure save directory exists
+                        if (!fs.existsSync(savePath)) {
+                            fs.mkdirSync(savePath, { recursive: true });
+                        }
+
+                        // Always fetch full message for metadata (needed for attachments list)
+                        const fullResponse = await gmail.users.messages.get({
+                            userId: "me",
+                            id: messageId,
+                            format: "full",
+                        });
+
+                        const { subject, from, date } = extractHeaders(fullResponse.data.payload);
+                        const attachments = extractAttachments(fullResponse.data.payload as GmailMessagePart);
+
+                        let content: string;
+
+                        if (format === "eml") {
+                            // For EML format, fetch raw RFC822 message
+                            const rawResponse = await gmail.users.messages.get({
+                                userId: "me",
+                                id: messageId,
+                                format: "raw",
+                            });
+                            content = Buffer.from(rawResponse.data.raw || "", "base64url").toString("utf-8");
+                        } else {
+                            // Extract email content for json/txt/html
+                            const emailContent = extractEmailContent(fullResponse.data.payload as GmailMessagePart || {});
+
+                            if (format === "json") {
+                                const jsonData = gmailMessageToJson(fullResponse.data, emailContent, attachments);
+                                content = JSON.stringify(jsonData, null, 2);
+                            } else if (format === "txt") {
+                                content = emailToTxt(fullResponse.data, emailContent, attachments);
+                            } else {
+                                // html - just return the raw HTML content
+                                content = emailToHtml(emailContent);
+                            }
+                        }
+
+                        // Write file
+                        const filename = `${messageId}.${format}`;
+                        const fullPath = path.join(savePath, filename);
+                        fs.writeFileSync(fullPath, content, "utf-8");
+                        const stats = fs.statSync(fullPath);
+
+                        // Return metadata with attachments
+                        const result = {
+                            status: "saved",
+                            path: fullPath,
+                            size: stats.size,
+                            messageId,
+                            subject,
+                            from,
+                            date,
+                            attachments,
+                        };
+
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: JSON.stringify(result, null, 2),
+                                },
+                            ],
+                        };
+                    } catch (error: any) {
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `Failed to download email: ${error.message}`,
+                                },
+                            ],
+                        };
+                    }
                 }
 
                 // Updated implementation for the modify_email handler
@@ -1109,7 +1082,7 @@ async function main() {
                 }
                 case "download_attachment": {
                     const validatedArgs = DownloadAttachmentSchema.parse(args);
-                    
+
                     try {
                         // Get the attachment data from Gmail API
                         const attachmentResponse = await gmail.users.messages.attachments.get({
@@ -1129,7 +1102,7 @@ async function main() {
                         // Determine save path and filename
                         const savePath = validatedArgs.savePath || process.cwd();
                         let filename = validatedArgs.filename;
-                        
+
                         if (!filename) {
                             // Get original filename from message if not provided
                             const messageResponse = await gmail.users.messages.get({
@@ -1137,7 +1110,7 @@ async function main() {
                                 id: validatedArgs.messageId,
                                 format: 'full',
                             });
-                            
+
                             // Find the attachment part to get original filename
                             const findAttachment = (part: any): string | null => {
                                 if (part.body && part.body.attachmentId === validatedArgs.attachmentId) {
@@ -1151,17 +1124,24 @@ async function main() {
                                 }
                                 return null;
                             };
-                            
+
                             filename = findAttachment(messageResponse.data.payload) || `attachment-${validatedArgs.attachmentId}`;
                         }
+
+                        // Sanitize filename to prevent path traversal
+                        filename = path.basename(filename);
 
                         // Ensure save directory exists
                         if (!fs.existsSync(savePath)) {
                             fs.mkdirSync(savePath, { recursive: true });
                         }
 
-                        // Write file
-                        const fullPath = path.join(savePath, filename);
+                        // Resolve and validate final path stays within savePath
+                        const resolvedSavePath = path.resolve(savePath);
+                        const fullPath = path.resolve(resolvedSavePath, filename);
+                        if (!fullPath.startsWith(resolvedSavePath + path.sep) && fullPath !== resolvedSavePath) {
+                            throw new Error('Invalid filename: path traversal detected');
+                        }
                         fs.writeFileSync(fullPath, buffer);
 
                         return {
@@ -1182,6 +1162,372 @@ async function main() {
                             ],
                         };
                     }
+                }
+
+                case "get_thread": {
+                    const validatedArgs = GetThreadSchema.parse(args);
+                    const threadResponse = await gmail.users.threads.get({
+                        userId: 'me',
+                        id: validatedArgs.threadId,
+                        format: validatedArgs.format || 'full',
+                    });
+
+                    const threadMessages = threadResponse.data.messages || [];
+
+                    // Process each message in the thread (already chronological from API)
+                    const messagesOutput = threadMessages.map((msg) => {
+                        const headers = msg.payload?.headers || [];
+                        const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '';
+                        const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || '';
+                        const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
+                        const cc = headers.find(h => h.name?.toLowerCase() === 'cc')?.value || '';
+                        const bcc = headers.find(h => h.name?.toLowerCase() === 'bcc')?.value || '';
+                        const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
+
+                        // Extract body content
+                        let body = '';
+                        if (validatedArgs.format !== 'minimal') {
+                            const { text, html } = extractEmailContent(msg.payload as GmailMessagePart || {});
+                            body = text || html || '';
+                        }
+
+                        // Extract attachment metadata
+                        const attachments: EmailAttachment[] = [];
+                        const processAttachmentParts = (part: GmailMessagePart) => {
+                            if (part.body && part.body.attachmentId) {
+                                const filename = part.filename || `attachment-${part.body.attachmentId}`;
+                                attachments.push({
+                                    id: part.body.attachmentId,
+                                    filename: filename,
+                                    mimeType: part.mimeType || 'application/octet-stream',
+                                    size: part.body.size || 0,
+                                });
+                            }
+                            if (part.parts) {
+                                part.parts.forEach((subpart: GmailMessagePart) => processAttachmentParts(subpart));
+                            }
+                        };
+                        if (msg.payload) {
+                            processAttachmentParts(msg.payload as GmailMessagePart);
+                        }
+
+                        return {
+                            messageId: msg.id || '',
+                            threadId: msg.threadId || '',
+                            from,
+                            to,
+                            cc,
+                            bcc,
+                            subject,
+                            date,
+                            body,
+                            labelIds: msg.labelIds || [],
+                            attachments: attachments.map(a => ({
+                                filename: a.filename,
+                                mimeType: a.mimeType,
+                                size: a.size,
+                            })),
+                        };
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    threadId: validatedArgs.threadId,
+                                    messageCount: messagesOutput.length,
+                                    messages: messagesOutput,
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                }
+
+                case "list_inbox_threads": {
+                    const validatedArgs = ListInboxThreadsSchema.parse(args);
+                    const threadsResponse = await gmail.users.threads.list({
+                        userId: 'me',
+                        q: validatedArgs.query || 'in:inbox',
+                        maxResults: validatedArgs.maxResults || 50,
+                    });
+
+                    const threads = threadsResponse.data.threads || [];
+
+                    // Fetch metadata for each thread to get message count and latest message info
+                    const threadDetails = await Promise.all(
+                        threads.map(async (thread) => {
+                            const detail = await gmail.users.threads.get({
+                                userId: 'me',
+                                id: thread.id!,
+                                format: 'metadata',
+                                metadataHeaders: ['Subject', 'From', 'Date'],
+                            });
+
+                            const messages = detail.data.messages || [];
+                            const latestMessage = messages[messages.length - 1];
+                            const latestHeaders = latestMessage?.payload?.headers || [];
+
+                            return {
+                                threadId: thread.id || '',
+                                snippet: thread.snippet || '',
+                                historyId: thread.historyId || '',
+                                messageCount: messages.length,
+                                latestMessage: {
+                                    from: latestHeaders.find(h => h.name === 'From')?.value || '',
+                                    subject: latestHeaders.find(h => h.name === 'Subject')?.value || '',
+                                    date: latestHeaders.find(h => h.name === 'Date')?.value || '',
+                                },
+                            };
+                        })
+                    );
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    resultCount: threadDetails.length,
+                                    threads: threadDetails,
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                }
+
+                case "get_inbox_with_threads": {
+                    const validatedArgs = GetInboxWithThreadsSchema.parse(args);
+                    const threadsResponse = await gmail.users.threads.list({
+                        userId: 'me',
+                        q: validatedArgs.query || 'in:inbox',
+                        maxResults: validatedArgs.maxResults || 50,
+                    });
+
+                    const threads = threadsResponse.data.threads || [];
+
+                    if (!validatedArgs.expandThreads) {
+                        // Return basic thread list without expansion (same as list_inbox_threads)
+                        const threadSummaries = await Promise.all(
+                            threads.map(async (thread) => {
+                                const detail = await gmail.users.threads.get({
+                                    userId: 'me',
+                                    id: thread.id!,
+                                    format: 'metadata',
+                                    metadataHeaders: ['Subject', 'From', 'Date'],
+                                });
+
+                                const messages = detail.data.messages || [];
+                                const latestMessage = messages[messages.length - 1];
+                                const latestHeaders = latestMessage?.payload?.headers || [];
+
+                                return {
+                                    threadId: thread.id || '',
+                                    snippet: thread.snippet || '',
+                                    historyId: thread.historyId || '',
+                                    messageCount: messages.length,
+                                    latestMessage: {
+                                        from: latestHeaders.find(h => h.name === 'From')?.value || '',
+                                        subject: latestHeaders.find(h => h.name === 'Subject')?.value || '',
+                                        date: latestHeaders.find(h => h.name === 'Date')?.value || '',
+                                    },
+                                };
+                            })
+                        );
+
+                        return {
+                            content: [
+                                {
+                                    type: "text",
+                                    text: JSON.stringify({
+                                        resultCount: threadSummaries.length,
+                                        threads: threadSummaries,
+                                    }, null, 2),
+                                },
+                            ],
+                        };
+                    }
+
+                    // Expand each thread with full message content (parallel fetch)
+                    const expandedThreads = await Promise.all(
+                        threads.map(async (thread) => {
+                            const threadDetail = await gmail.users.threads.get({
+                                userId: 'me',
+                                id: thread.id!,
+                                format: 'full',
+                            });
+
+                            const threadMessages = threadDetail.data.messages || [];
+
+                            const messages = threadMessages.map((msg) => {
+                                const headers = msg.payload?.headers || [];
+                                const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '';
+                                const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || '';
+                                const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
+                                const cc = headers.find(h => h.name?.toLowerCase() === 'cc')?.value || '';
+                                const bcc = headers.find(h => h.name?.toLowerCase() === 'bcc')?.value || '';
+                                const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
+
+                                const { text, html } = extractEmailContent(msg.payload as GmailMessagePart || {});
+                                const body = text || html || '';
+
+                                // Extract attachment metadata
+                                const attachments: EmailAttachment[] = [];
+                                const processAttachmentParts = (part: GmailMessagePart) => {
+                                    if (part.body && part.body.attachmentId) {
+                                        const filename = part.filename || `attachment-${part.body.attachmentId}`;
+                                        attachments.push({
+                                            id: part.body.attachmentId,
+                                            filename: filename,
+                                            mimeType: part.mimeType || 'application/octet-stream',
+                                            size: part.body.size || 0,
+                                        });
+                                    }
+                                    if (part.parts) {
+                                        part.parts.forEach((subpart: GmailMessagePart) => processAttachmentParts(subpart));
+                                    }
+                                };
+                                if (msg.payload) {
+                                    processAttachmentParts(msg.payload as GmailMessagePart);
+                                }
+
+                                return {
+                                    messageId: msg.id || '',
+                                    threadId: msg.threadId || '',
+                                    from,
+                                    to,
+                                    cc,
+                                    bcc,
+                                    subject,
+                                    date,
+                                    body,
+                                    labelIds: msg.labelIds || [],
+                                    attachments: attachments.map(a => ({
+                                        filename: a.filename,
+                                        mimeType: a.mimeType,
+                                        size: a.size,
+                                    })),
+                                };
+                            });
+
+                            return {
+                                threadId: thread.id || '',
+                                messageCount: messages.length,
+                                messages,
+                            };
+                        })
+                    );
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    resultCount: expandedThreads.length,
+                                    threads: expandedThreads,
+                                }, null, 2),
+                            },
+                        ],
+                    };
+                }
+
+                case "reply_all": {
+                    const validatedArgs = ReplyAllSchema.parse(args);
+
+                    // Fetch the original email to get headers
+                    const originalEmail = await gmail.users.messages.get({
+                        userId: 'me',
+                        id: validatedArgs.messageId,
+                        format: 'full',
+                    });
+
+                    const headers = originalEmail.data.payload?.headers || [];
+                    const threadId = originalEmail.data.threadId || '';
+
+                    // Extract relevant headers
+                    const originalFrom = headers.find(h => h.name?.toLowerCase() === 'from')?.value || '';
+                    const originalTo = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
+                    const originalCc = headers.find(h => h.name?.toLowerCase() === 'cc')?.value || '';
+                    const originalSubject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '';
+                    const originalMessageId = headers.find(h => h.name?.toLowerCase() === 'message-id')?.value || '';
+                    const originalReferences = headers.find(h => h.name?.toLowerCase() === 'references')?.value || '';
+
+                    // Get authenticated user's email to exclude from recipients
+                    const profile = await gmail.users.getProfile({ userId: 'me' });
+                    const myEmail = profile.data.emailAddress?.toLowerCase() || '';
+
+                    // Build recipient list using helper functions
+                    const { to: replyTo, cc: replyCc } = buildReplyAllRecipients(
+                        originalFrom,
+                        originalTo,
+                        originalCc,
+                        myEmail
+                    );
+
+                    if (replyTo.length === 0) {
+                        throw new Error('Could not determine recipient for reply');
+                    }
+
+                    // Build subject with "Re:" prefix if not already present
+                    const replySubject = addRePrefix(originalSubject);
+
+                    // Build References header (original References + original Message-ID)
+                    const references = buildReferencesHeader(originalReferences, originalMessageId);
+
+                    // Prepare the email arguments for handleEmailAction
+                    const emailArgs = {
+                        to: replyTo,
+                        cc: replyCc.length > 0 ? replyCc : undefined,
+                        subject: replySubject,
+                        body: validatedArgs.body,
+                        htmlBody: validatedArgs.htmlBody,
+                        mimeType: validatedArgs.mimeType,
+                        threadId: threadId,
+                        inReplyTo: originalMessageId,
+                        attachments: validatedArgs.attachments,
+                    };
+
+                    // Use the existing handleEmailAction to send the reply
+                    const result = await handleEmailAction("send", emailArgs);
+
+                    // Enhance the response with reply-all specific info
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Reply-all sent successfully!\nTo: ${replyTo.join(', ')}${replyCc.length > 0 ? `\nCC: ${replyCc.join(', ')}` : ''}\nSubject: ${replySubject}\nThread ID: ${threadId}`,
+                            },
+                        ],
+                    };
+                }
+
+                case "modify_thread": {
+                    const validatedArgs = ModifyThreadSchema.parse(args);
+
+                    // Prepare request body for threads.modify
+                    const modifyRequestBody: any = {};
+
+                    if (validatedArgs.addLabelIds) {
+                        modifyRequestBody.addLabelIds = validatedArgs.addLabelIds;
+                    }
+
+                    if (validatedArgs.removeLabelIds) {
+                        modifyRequestBody.removeLabelIds = validatedArgs.removeLabelIds;
+                    }
+
+                    await gmail.users.threads.modify({
+                        userId: 'me',
+                        id: validatedArgs.threadId,
+                        requestBody: modifyRequestBody,
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Thread ${validatedArgs.threadId} labels updated successfully (all messages in thread modified)`,
+                            },
+                        ],
+                    };
                 }
 
                 default:

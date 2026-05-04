@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  push:
+    branches: [main, experimental]
+  pull_request:
+    branches: [main, experimental]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  readme-check:
+    name: README Updated
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for skip flag
+        id: skip
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          COMMIT_MSG=$(git log -1 --format=%s)
+          # Skip on explicit flag
+          if echo "$COMMIT_MSG" | grep -qiE '\[(skip-readme|no-readme)\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif echo "$PR_TITLE" | grep -qiE '\[(skip-readme|no-readme)\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          # Skip on merge commits (experimental → main promotions already checked on experimental)
+          elif echo "$COMMIT_MSG" | grep -qiE '^Merge branch'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check README updated (push)
+        id: push_check
+        if: github.event_name == 'push' && steps.skip.outputs.skip == 'false'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            DIFF_RANGE="HEAD~1..HEAD"
+          else
+            DIFF_RANGE="$BEFORE_SHA..HEAD"
+          fi
+
+          # Only require README update if source code was modified
+          SRC_CHANGED=$(git diff --name-only $DIFF_RANGE | grep -c '^src/' || true)
+          if [ "$SRC_CHANGED" -eq 0 ]; then
+            echo "No source code changes — README check skipped."
+            exit 0
+          fi
+
+          # Capture changed source files for the issue body
+          SRC_FILES=$(git diff --name-only $DIFF_RANGE | grep '^src/' || true)
+          echo "src_files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SRC_FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          README_CHANGED=$(git diff --name-only $DIFF_RANGE | grep -c '^README\.md$' || true)
+          if [ "$README_CHANGED" -eq 0 ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Source code changed but README.md was not updated."
+            echo ""
+            echo "Every push with source changes should include a README.md update."
+            echo "If this change genuinely doesn't need a docs update, add [skip-readme] or [no-readme] to your commit message."
+            exit 1
+          fi
+
+      - name: Check README updated (PR)
+        id: pr_check
+        if: github.event_name == 'pull_request' && steps.skip.outputs.skip == 'false'
+        run: |
+          DIFF_RANGE="origin/${{ github.base_ref }}...HEAD"
+
+          SRC_CHANGED=$(git diff --name-only $DIFF_RANGE | grep -c '^src/' || true)
+          if [ "$SRC_CHANGED" -eq 0 ]; then
+            echo "No source code changes — README check skipped."
+            exit 0
+          fi
+
+          README_CHANGED=$(git diff --name-only $DIFF_RANGE | grep -c '^README\.md$' || true)
+          if [ "$README_CHANGED" -eq 0 ]; then
+            echo "::error::Source code changed but README.md was not updated in this PR."
+            echo ""
+            echo "Every PR with source changes should include a README.md update."
+            echo "If this change genuinely doesn't need a docs update, add [skip-readme] or [no-readme] to your PR title."
+            exit 1
+          fi
+
+      - name: README check passed
+        if: steps.skip.outputs.skip == 'true'
+        run: echo "README check skipped via commit message or PR title flag."
+
+      - name: Create issue for README gap (push)
+        if: failure() && steps.push_check.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMIT_SHA="${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          BRANCH="${{ github.ref_name }}"
+          COMMIT_MSG=$(git log -1 --format=%s)
+          SRC_FILES="${{ steps.push_check.outputs.src_files }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Ensure readme-gap label exists
+          gh label create "readme-gap" --repo "${{ github.repository }}" \
+            --description "README.md not updated alongside source changes" \
+            --color "D93F0B" 2>/dev/null || true
+
+          # Check for existing open issue to avoid duplicates
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" \
+            --label "readme-gap" --state open --limit 1 --json number -q '.[0].number' || true)
+
+          if [ -n "$EXISTING" ]; then
+            # Append a comment to the existing issue instead of creating a new one
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" \
+              --body "Another push with source changes but no README update:
+
+          - **Commit:** [\`${SHORT_SHA}\`](${{ github.server_url }}/${{ github.repository }}/commit/${COMMIT_SHA}) — ${COMMIT_MSG}
+          - **Branch:** \`${BRANCH}\`
+          - **CI run:** ${RUN_URL}
+          - **Files changed:**
+          \`\`\`
+          ${SRC_FILES}
+          \`\`\`"
+            echo "Appended to existing issue #${EXISTING}"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "README.md out of date — source changed without docs update (${SHORT_SHA})" \
+              --label "readme-gap,documentation" \
+              --body "## README gap detected by CI
+
+          A push to \`${BRANCH}\` changed source code without updating README.md.
+
+          - **Commit:** [\`${SHORT_SHA}\`](${{ github.server_url }}/${{ github.repository }}/commit/${COMMIT_SHA}) — ${COMMIT_MSG}
+          - **Branch:** \`${BRANCH}\`
+          - **CI run:** ${RUN_URL}
+          - **Source files changed:**
+          \`\`\`
+          ${SRC_FILES}
+          \`\`\`
+
+          ### What to do
+          1. Review the changed source files above
+          2. Update README.md to reflect any user-facing changes
+          3. Push the README update (this issue will be auto-closed when CI passes)
+
+          *If this change genuinely needs no docs update, close this issue with a comment explaining why.*"
+            echo "Created new README gap issue"
+          fi
+
+  build-and-test:
+    name: Build & Test
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test

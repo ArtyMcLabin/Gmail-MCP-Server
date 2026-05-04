@@ -67,7 +67,7 @@ export async function listFilters(gmail: any) {
             userId: 'me',
         });
 
-        const filters = response.data.filters || [];
+        const filters = response.data.filter || [];
         
         return {
             filters,
