@@ -30,10 +30,6 @@ All features are production-tested in daily use.
 
 [![CI](https://github.com/ArtyMcLabin/Gmail-MCP-Server/actions/workflows/ci.yml/badge.svg)](https://github.com/ArtyMcLabin/Gmail-MCP-Server/actions/workflows/ci.yml)
 
-> This README targets the actively maintained fork: [ArtyMcLabin/Gmail-MCP-Server](https://github.com/ArtyMcLabin/Gmail-MCP-Server).
->
-> The previous upstream install target is no longer recommended.
-
 A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop with auto authentication support. This server enables AI assistants to manage Gmail through natural language interactions.
 
 ![](https://badge.mcpx.dev?type=server 'MCP Server')
@@ -70,8 +66,10 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 For Claude Code CLI, add the maintained fork as an MCP server:
 
 ```bash
-claude mcp add gmail -- npx -y ArtyMcLabin/Gmail-MCP-Server@latest
+claude mcp add gmail -- npx -y github:ArtyMcLabin/Gmail-MCP-Server#main
 ```
+
+The explicit `github:` spec keeps the install pointed at this maintained repository; npm `@latest` tags apply to published npm packages, not GitHub branches.
 
 For Claude Desktop, use the JSON configuration shown below after authenticating.
 
@@ -103,14 +101,14 @@ For Claude Desktop, use the JSON configuration shown below after authenticating.
    mv gcp-oauth.keys.json ~/.gmail-mcp/
 
    # Run authentication from anywhere
-   npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth
+   npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth
    ```
 
    b. Local Authentication:
    ```bash
    # Place gcp-oauth.keys.json in your current directory
    # The file will be automatically copied to global config
-   npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth
+   npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth
    ```
 
    The authentication process will:
@@ -133,7 +131,7 @@ For Claude Desktop, use the JSON configuration shown below after authenticating.
       "command": "npx",
       "args": [
         "-y",
-        "ArtyMcLabin/Gmail-MCP-Server@latest"
+        "github:ArtyMcLabin/Gmail-MCP-Server#main"
       ]
     }
   }
@@ -181,7 +179,7 @@ docker run -i --rm \
 For cloud server environments (like n8n), you can specify a custom callback URL during authentication:
 
 ```bash
-npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth https://gmail.example.com/oauth2callback
+npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth https://gmail.example.com/oauth2callback
 ```
 
 #### Setup Instructions for Cloud Environment
@@ -198,7 +196,7 @@ npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth https://gmail.example.com/oauth2
 
 4. **Run Authentication:**
    ```bash
-   npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth https://gmail.example.com/oauth2callback
+   npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth https://gmail.example.com/oauth2callback
    ```
 
 5. **Configure in your application:**
@@ -209,7 +207,7 @@ npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth https://gmail.example.com/oauth2
          "command": "npx",
          "args": [
            "-y",
-           "ArtyMcLabin/Gmail-MCP-Server@latest"
+           "github:ArtyMcLabin/Gmail-MCP-Server#main"
          ]
        }
      }
