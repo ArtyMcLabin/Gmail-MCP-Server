@@ -35,13 +35,15 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 
 ## Installation & Authentication
 
-### Installing from the maintained GitHub fork
+### Installing in Claude
 
-Use the GitHub package spec so `npx` runs the maintained fork's latest default branch:
+For Claude Code CLI, add the maintained fork as an MCP server:
 
 ```bash
-npx -y ArtyMcLabin/Gmail-MCP-Server@latest auth
+claude mcp add gmail -- npx -y ArtyMcLabin/Gmail-MCP-Server@latest
 ```
+
+For Claude Desktop, use the JSON configuration shown below after authenticating.
 
 ### Installing Manually
 1. Create a Google Cloud Project and obtain credentials:
