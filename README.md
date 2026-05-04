@@ -28,6 +28,8 @@ All features are production-tested in daily use.
 
 ---
 
+[![CI](https://github.com/ArtyMcLabin/Gmail-MCP-Server/actions/workflows/ci.yml/badge.svg)](https://github.com/ArtyMcLabin/Gmail-MCP-Server/actions/workflows/ci.yml)
+
 A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop with auto authentication support. This server enables AI assistants to manage Gmail through natural language interactions.
 
 ![](https://badge.mcpx.dev?type=server 'MCP Server')
@@ -59,6 +61,18 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 
 ## Installation & Authentication
 
+### Installing in Claude
+
+For Claude Code CLI, add the maintained fork as an MCP server:
+
+```bash
+claude mcp add gmail -- npx -y github:ArtyMcLabin/Gmail-MCP-Server#main
+```
+
+The explicit `github:` spec keeps the install pointed at this maintained repository; npm `@latest` tags apply to published npm packages, not GitHub branches.
+
+For Claude Desktop, use the JSON configuration shown below after authenticating.
+
 ### Installing Manually
 1. Create a Google Cloud Project and obtain credentials:
 
@@ -87,14 +101,14 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
    mv gcp-oauth.keys.json ~/.gmail-mcp/
 
    # Run authentication from anywhere
-   npx @gongrzhe/server-gmail-autoauth-mcp auth
+   npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth
    ```
 
    b. Local Authentication:
    ```bash
    # Place gcp-oauth.keys.json in your current directory
    # The file will be automatically copied to global config
-   npx @gongrzhe/server-gmail-autoauth-mcp auth
+   npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth
    ```
 
    The authentication process will:
@@ -116,7 +130,8 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
     "gmail": {
       "command": "npx",
       "args": [
-        "@gongrzhe/server-gmail-autoauth-mcp"
+        "-y",
+        "github:ArtyMcLabin/Gmail-MCP-Server#main"
       ]
     }
   }
@@ -164,24 +179,24 @@ docker run -i --rm \
 For cloud server environments (like n8n), you can specify a custom callback URL during authentication:
 
 ```bash
-npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2callback
+npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth https://gmail.example.com/oauth2callback
 ```
 
 #### Setup Instructions for Cloud Environment
 
 1. **Configure Reverse Proxy:**
    - Set up your n8n container to expose a port for authentication
-   - Configure a reverse proxy to forward traffic from your domain (e.g., `gmail.gongrzhe.com`) to this port
+   - Configure a reverse proxy to forward traffic from your domain (e.g., `gmail.example.com`) to this port
 
 2. **DNS Configuration:**
    - Add an A record in your DNS settings to resolve your domain to your cloud server's IP address
 
 3. **Google Cloud Platform Setup:**
-   - In your Google Cloud Console, add your custom domain callback URL (e.g., `https://gmail.gongrzhe.com/oauth2callback`) to the authorized redirect URIs list
+   - In your Google Cloud Console, add your custom domain callback URL (e.g., `https://gmail.example.com/oauth2callback`) to the authorized redirect URIs list
 
 4. **Run Authentication:**
    ```bash
-   npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2callback
+   npx -y github:ArtyMcLabin/Gmail-MCP-Server#main auth https://gmail.example.com/oauth2callback
    ```
 
 5. **Configure in your application:**
@@ -191,7 +206,8 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2ca
        "gmail": {
          "command": "npx",
          "args": [
-           "@gongrzhe/server-gmail-autoauth-mcp"
+           "-y",
+           "github:ArtyMcLabin/Gmail-MCP-Server#main"
          ]
        }
      }
