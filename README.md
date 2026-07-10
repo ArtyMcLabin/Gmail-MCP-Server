@@ -32,6 +32,7 @@ There's a downstream fork that took this in the **maximalist** direction. I'm no
 - **Draft lifecycle tools** - `send_draft`, `delete_draft`, `update_draft` close the orphan-draft gap: `send_draft` atomically sends an existing draft and removes it from Drafts (no ghost copy); `update_draft` mutates a draft in place preserving its ID (no draft pile-up across iteration loops); `delete_draft` discards an abandoned draft ([PR #30](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/30) by [@thisisambros](https://github.com/thisisambros))
 - **Tool annotations** - MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** - `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
+- **Persistent OAuth refresh token** - auth now survives server restarts and access-token rotation: refreshed tokens are written back to the credentials file, and the consent prompt always requests a `refresh_token`, so you no longer have to re-authenticate periodically ([PR #35](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/35) by [@BrentBaccala](https://github.com/BrentBaccala))
 
 All features are production-tested in daily use.
 
@@ -285,6 +286,8 @@ The server automatically filters available tools based on your authorized scopes
 ### Re-authenticating
 
 To change your scopes, simply run the auth command again with different scopes. This will replace your existing credentials.
+
+Once authenticated, credentials persist across restarts: the server writes refreshed tokens back to the credentials file as the access token rotates, and initial auth always requests a `refresh_token`, so you should not need to re-authenticate under normal use. Re-run `auth` only when you want to **change scopes** (for example adding `gmail.full` for permanent delete — see [OAuth Scopes](#oauth-scopes)) or if you revoked the app's access in your Google account and hit an `invalid_grant` error.
 
 ## Claude Code CLI Configuration
 

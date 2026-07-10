@@ -368,11 +368,28 @@ async function main() {
         // Verify the tool is authorized for the current scopes
         // This guards against direct tool calls that bypass ListTools
         const toolDef = getToolByName(name);
-        if (!toolDef || !hasScope(authorizedScopes, toolDef.scopes)) {
+        if (!toolDef) {
             return {
                 content: [{
                     type: "text",
                     text: `Error: Tool "${name}" is not available. You may need to re-authenticate with additional scopes.`,
+                }],
+            };
+        }
+        if (!hasScope(authorizedScopes, toolDef.scopes)) {
+            // Name the exact missing scope and the re-auth command so the user
+            // isn't left guessing (e.g. delete_email needs gmail.full, which the
+            // default gmail.modify does not cover — see issue #38).
+            const required = toolDef.scopes.join(" or ");
+            const suggested = Array.from(
+                new Set([...toolDef.scopes, "gmail.settings.basic"])
+            ).join(",");
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error: Tool "${name}" requires the ${required} scope. `
+                        + `Your current authorization grants: ${authorizedScopes.join(", ") || "(none)"}. `
+                        + `Re-authenticate to add it, e.g.:\n  node dist/index.js auth --scopes=${suggested}`,
                 }],
             };
         }

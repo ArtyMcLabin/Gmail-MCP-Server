@@ -25,6 +25,11 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Local tool/plugin artifacts (RuVector memory graph from ruflo Claude Code plugins)
+ruvector.db
+agentdb.rvf
+agentdb.rvf.lock
+
 # Project specific
 mcp-config.json
 gcp-oauth.keys.json
