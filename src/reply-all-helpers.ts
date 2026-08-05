@@ -47,6 +47,25 @@ export function filterOutEmail(emails: string[], myEmail: string): string[] {
 }
 
 /**
+ * Removes duplicate addresses, comparing case-insensitively and keeping the
+ * first occurrence's original casing.
+ *
+ * @param emails - Array of email addresses
+ * @returns Array without case-insensitive duplicates
+ */
+export function dedupeEmails(emails: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const email of emails) {
+        const key = email.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(email);
+    }
+    return result;
+}
+
+/**
  * Adds "Re: " prefix to a subject if not already present.
  * Case-insensitive check for existing prefix.
  *
@@ -80,7 +99,8 @@ export function buildReferencesHeader(originalReferences: string, originalMessag
  *
  * Rules:
  * - TO: original From (sender of the email)
- * - CC: original To + original CC (excluding the authenticated user)
+ * - CC: original To + original CC (excluding the authenticated user and anyone
+ *   already in TO; duplicates are removed case-insensitively)
  *
  * @param originalFrom - From header value
  * @param originalTo - To header value
@@ -99,10 +119,13 @@ export function buildReplyAllRecipients(
     const ccEmails = parseEmailAddresses(originalCc);
 
     // TO recipients: original From (the person who sent the email), excluding myself
-    const replyTo = filterOutEmail(fromEmails, myEmail);
+    const replyTo = dedupeEmails(filterOutEmail(fromEmails, myEmail));
 
-    // CC recipients: everyone else who was on To and CC, excluding myself
-    const replyCc = filterOutEmail([...toEmails, ...ccEmails], myEmail);
+    // CC recipients: everyone else who was on To and CC, excluding myself and
+    // anyone already in TO (a sender listed in To/CC would otherwise be addressed twice)
+    const replyToKeys = new Set(replyTo.map(email => email.toLowerCase()));
+    const replyCc = dedupeEmails(filterOutEmail([...toEmails, ...ccEmails], myEmail))
+        .filter(email => !replyToKeys.has(email.toLowerCase()));
 
     return {
         to: replyTo,

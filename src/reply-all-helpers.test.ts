@@ -195,6 +195,37 @@ describe('buildReplyAllRecipients', () => {
         expect(result.cc).toEqual(['recipient@example.com']);
     });
 
+    it('excludes the original sender from CC when they also appear in To', () => {
+        const result = buildReplyAllRecipients(
+            'sender@example.com',
+            'sender@example.com, other@example.com',
+            '',
+            myEmail
+        );
+        expect(result.to).toEqual(['sender@example.com']);
+        expect(result.cc).toEqual(['other@example.com']);
+    });
+
+    it('excludes the original sender from CC case-insensitively', () => {
+        const result = buildReplyAllRecipients(
+            'Sender <sender@example.com>',
+            'other@example.com',
+            'SENDER@EXAMPLE.COM',
+            myEmail
+        );
+        expect(result.cc).toEqual(['other@example.com']);
+    });
+
+    it('removes duplicate CC addresses appearing in both To and CC', () => {
+        const result = buildReplyAllRecipients(
+            'sender@example.com',
+            'dup@example.com, other@example.com',
+            'Dup <dup@example.com>',
+            myEmail
+        );
+        expect(result.cc).toEqual(['dup@example.com', 'other@example.com']);
+    });
+
     it('is case insensitive when excluding authenticated user', () => {
         const result = buildReplyAllRecipients(
             'sender@example.com',
