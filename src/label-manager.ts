@@ -181,22 +181,25 @@ export async function findLabelByName(gmail: any, labelName: string) {
  * @param gmail - Gmail API instance
  * @param labelName - Name of the label to create
  * @param options - Optional settings for the label
- * @returns The new or existing label
+ * @returns The label plus whether it was newly created (a created label is
+ *          indistinguishable from an existing one by shape alone — both are
+ *          type 'user' with the requested name — so the flag is the only
+ *          reliable way for callers to report what happened)
  */
 export async function getOrCreateLabel(gmail: any, labelName: string, options: {
     messageListVisibility?: string;
     labelListVisibility?: string;
-} = {}) {
+} = {}): Promise<{ label: GmailLabel; created: boolean }> {
     try {
         // First try to find an existing label
         const existingLabel = await findLabelByName(gmail, labelName);
-        
+
         if (existingLabel) {
-            return existingLabel;
+            return { label: existingLabel, created: false };
         }
-        
+
         // If not found, create a new one
-        return await createLabel(gmail, labelName, options);
+        return { label: await createLabel(gmail, labelName, options), created: true };
     } catch (error: any) {
         throw new Error(`Failed to get or create label: ${error.message}`);
     }

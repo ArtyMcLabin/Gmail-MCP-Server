@@ -164,6 +164,13 @@ describe('Source verification', () => {
         expect(source).toContain("validatedArgs.references = allMessageIds.join(' ')");
     });
 
+    it('reply_all forwards the built References chain to handleEmailAction', () => {
+        const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
+        const replyAllBlock = source.slice(source.indexOf('case "reply_all"'), source.indexOf('case "modify_thread"'));
+        expect(replyAllBlock).toContain('const references = buildReferencesHeader(');
+        expect(replyAllBlock).toContain('references: references');
+    });
+
     it('read_email returns Message-ID', () => {
         const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
         expect(source).toContain('message-id');

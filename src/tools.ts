@@ -142,7 +142,7 @@ export const CreateFilterSchema = z.object({
   action: z.object({
     addLabelIds: z.array(z.string()).optional().describe("Label IDs to add to matching emails"),
     removeLabelIds: z.array(z.string()).optional().describe("Label IDs to remove from matching emails"),
-    forward: z.string().optional().describe("Email address to forward matching emails to")
+    forward: z.string().optional().describe("Email address to forward matching emails to (requires the gmail.settings.sharing scope)")
   }).describe("Actions to perform on matching emails")
 }).describe("Creates a new Gmail filter");
 
