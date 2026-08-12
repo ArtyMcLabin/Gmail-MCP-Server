@@ -36,6 +36,21 @@ function sanitizeHeaderValue(value: string): string {
     return value.replace(/[\r\n\0]/g, '');
 }
 
+/**
+ * RFC 2045 restricts 7bit to US-ASCII. Declaring a non-ASCII body as 7bit and
+ * emitting the raw bytes produces a non-conformant message that relaying MTAs
+ * and receiving clients may mangle. Bodies containing non-ASCII are switched to
+ * base64 and wrapped at 76 characters.
+ */
+function encodeBodyPart(body: string): { encoding: string; content: string } {
+    const text = body ?? '';
+    if (!/[^\x00-\x7F]/.test(text)) {
+        return { encoding: '7bit', content: text };
+    }
+    const base64 = Buffer.from(text, 'utf8').toString('base64');
+    return { encoding: 'base64', content: base64.match(/.{1,76}/g)?.join('\r\n') ?? '' };
+}
+
 export function createEmailMessage(validatedArgs: any): string {
     const encodedSubject = encodeEmailHeader(sanitizeHeaderValue(validatedArgs.subject));
     // Determine content type based on available content and explicit mimeType
@@ -86,35 +101,39 @@ export function createEmailMessage(validatedArgs: any): string {
         emailParts.push('');
         
         // Plain text part
+        const textPart = encodeBodyPart(validatedArgs.body);
         emailParts.push(`--${boundary}`);
         emailParts.push('Content-Type: text/plain; charset=UTF-8');
-        emailParts.push('Content-Transfer-Encoding: 7bit');
+        emailParts.push(`Content-Transfer-Encoding: ${textPart.encoding}`);
         emailParts.push('');
-        emailParts.push(validatedArgs.body);
+        emailParts.push(textPart.content);
         emailParts.push('');
-        
+
         // HTML part
+        const htmlPart = encodeBodyPart(validatedArgs.htmlBody || validatedArgs.body); // Use body as fallback
         emailParts.push(`--${boundary}`);
         emailParts.push('Content-Type: text/html; charset=UTF-8');
-        emailParts.push('Content-Transfer-Encoding: 7bit');
+        emailParts.push(`Content-Transfer-Encoding: ${htmlPart.encoding}`);
         emailParts.push('');
-        emailParts.push(validatedArgs.htmlBody || validatedArgs.body); // Use body as fallback
+        emailParts.push(htmlPart.content);
         emailParts.push('');
-        
+
         // Close the boundary
         emailParts.push(`--${boundary}--`);
     } else if (mimeType === 'text/html') {
         // HTML-only email
+        const htmlPart = encodeBodyPart(validatedArgs.htmlBody || validatedArgs.body);
         emailParts.push('Content-Type: text/html; charset=UTF-8');
-        emailParts.push('Content-Transfer-Encoding: 7bit');
+        emailParts.push(`Content-Transfer-Encoding: ${htmlPart.encoding}`);
         emailParts.push('');
-        emailParts.push(validatedArgs.htmlBody || validatedArgs.body);
+        emailParts.push(htmlPart.content);
     } else {
         // Plain text email (default)
+        const textPart = encodeBodyPart(validatedArgs.body);
         emailParts.push('Content-Type: text/plain; charset=UTF-8');
-        emailParts.push('Content-Transfer-Encoding: 7bit');
+        emailParts.push(`Content-Transfer-Encoding: ${textPart.encoding}`);
         emailParts.push('');
-        emailParts.push(validatedArgs.body);
+        emailParts.push(textPart.content);
     }
 
     return emailParts.join('\r\n');

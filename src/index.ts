@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -203,13 +204,22 @@ async function loadCredentials() {
             // Legacy structure (pre-v1.2.0):
             //   { access_token, refresh_token, ... }
             //
-            // We support both formats for backwards compatibility. Users with legacy
-            // credentials will get DEFAULT_SCOPES (full access) until they re-authenticate.
+            // We support both formats for backwards compatibility. Legacy credentials
+            // carry no scope record, so we keep DEFAULT_SCOPES (gmail.modify +
+            // gmail.settings.basic) as an assumption — it is NOT full access, and it may
+            // not match what the stored token was actually granted. Tool exposure can
+            // therefore diverge from real token capability until re-authentication.
             const tokens = credentials.tokens || credentials;
             oauth2Client.setCredentials(tokens);
 
             if (credentials.scopes) {
                 authorizedScopes = credentials.scopes;
+            } else {
+                // stderr only: stdout is the MCP stdio protocol channel
+                console.error(
+                    `Warning: credentials file has no recorded scopes (legacy format). Assuming ${DEFAULT_SCOPES.join(', ')}; ` +
+                    'tool availability may not match the token\'s real permissions. Re-run `auth` to record actual scopes.'
+                );
             }
 
             // Persist refreshed tokens so refresh_token survives access_token rotation.
@@ -248,21 +258,32 @@ async function authenticate(scopes: string[]) {
     const port = callbackUrl.port
         ? Number(callbackUrl.port)
         : (callbackUrl.protocol === 'https:' ? 3000 : 80);
-    server.listen(port, '127.0.0.1');
 
     // Convert shorthand scope names (e.g., "gmail.readonly") to full Google API URLs
     const scopeUrls = scopeNamesToUrls(scopes);
 
-    return new Promise<void>((resolve, reject) => {
-        const authUrl = oauth2Client.generateAuthUrl({
-            access_type: 'offline',
-            prompt: 'consent',
-            scope: scopeUrls,
-        });
+    // Random state, echoed back by Google and compared here, so an authorization
+    // code injected by another local process is rejected instead of exchanged.
+    const state = crypto.randomBytes(32).toString('hex');
 
-        console.log('Requesting scopes:', scopes.join(', '));
-        console.log('Please visit this URL to authenticate:', authUrl);
-        open(authUrl);
+    return new Promise<void>((resolve, reject) => {
+        // Every exit path closes the listener exactly once. Without this, a bind
+        // failure (EADDRINUSE) or a failed token exchange left the promise pending
+        // and the listener open, so `auth` hung with no diagnostic.
+        let settled = false;
+        const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            server.close();
+            if (error) reject(error); else resolve();
+        };
+
+        server.on('error', (err: NodeJS.ErrnoException) => {
+            finish(new Error(
+                `Failed to start the local auth listener on 127.0.0.1:${port} (${err.code || err.message}). ` +
+                'Free the port or pass a callback URL with a different port.'
+            ));
+        });
 
         server.on('request', async (req, res) => {
             if (!req.url?.startsWith(callbackUrl.pathname)) return;
@@ -270,10 +291,17 @@ async function authenticate(scopes: string[]) {
             const url = new URL(req.url, callbackUrl.origin);
             const code = url.searchParams.get('code');
 
+            if (url.searchParams.get('state') !== state) {
+                res.writeHead(400);
+                res.end('Invalid state parameter');
+                finish(new Error('OAuth state mismatch - authorization response rejected'));
+                return;
+            }
+
             if (!code) {
                 res.writeHead(400);
                 res.end('No code provided');
-                reject(new Error('No code provided'));
+                finish(new Error('No code provided'));
                 return;
             }
 
@@ -288,13 +316,25 @@ async function authenticate(scopes: string[]) {
                 res.writeHead(200);
                 res.end('Authentication successful! You can close this window.');
                 console.log('Credentials saved with scopes:', scopes.join(', '));
-                server.close();
-                resolve();
-            } catch (error) {
+                finish();
+            } catch (error: any) {
                 res.writeHead(500);
                 res.end('Authentication failed');
-                reject(error);
+                finish(error instanceof Error ? error : new Error(String(error)));
             }
+        });
+
+        server.listen(port, '127.0.0.1', () => {
+            const authUrl = oauth2Client.generateAuthUrl({
+                access_type: 'offline',
+                prompt: 'consent',
+                scope: scopeUrls,
+                state,
+            });
+
+            console.log('Requesting scopes:', scopes.join(', '));
+            console.log('Please visit this URL to authenticate:', authUrl);
+            open(authUrl);
         });
     });
 }
@@ -376,6 +416,7 @@ async function main() {
         const toolDef = getToolByName(name);
         if (!toolDef || !hasScope(authorizedScopes, toolDef.scopes)) {
             return {
+                isError: true,
                 content: [{
                     type: "text",
                     text: `Error: Tool "${name}" is not available. You may need to re-authenticate with additional scopes.`,
@@ -735,6 +776,7 @@ async function main() {
                         };
                     } catch (error: any) {
                         return {
+                            isError: true,
                             content: [
                                 {
                                     type: "text",
@@ -1109,18 +1151,18 @@ async function main() {
 
                 case "get_or_create_label": {
                     const validatedArgs = GetOrCreateLabelSchema.parse(args);
-                    const result = await getOrCreateLabel(gmail, validatedArgs.name, {
+                    const { label, created } = await getOrCreateLabel(gmail, validatedArgs.name, {
                         messageListVisibility: validatedArgs.messageListVisibility,
                         labelListVisibility: validatedArgs.labelListVisibility,
                     });
 
-                    const action = result.type === 'user' && result.name === validatedArgs.name ? 'found existing' : 'created new';
-                    
+                    const action = created ? 'created new' : 'found existing';
+
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Successfully ${action} label:\nID: ${result.id}\nName: ${result.name}\nType: ${result.type}`,
+                                text: `Successfully ${action} label:\nID: ${label.id}\nName: ${label.name}\nType: ${label.type}`,
                             },
                         ],
                     };
@@ -1130,6 +1172,17 @@ async function main() {
                 // Filter management handlers
                 case "create_filter": {
                     const validatedArgs = CreateFilterSchema.parse(args);
+
+                    // Gmail API requires gmail.settings.sharing (not just settings.basic)
+                    // for filters carrying a forwarding action. Fail with a clear message
+                    // instead of letting the API return an opaque 403.
+                    if (validatedArgs.action.forward && !hasScope(authorizedScopes, ["gmail.settings.sharing"])) {
+                        throw new Error(
+                            'Filters with a forward action require the gmail.settings.sharing scope. ' +
+                            'Re-authenticate with --scopes=...,gmail.settings.sharing, or create the filter without "forward".'
+                        );
+                    }
+
                     const result = await createFilter(gmail, validatedArgs.criteria, validatedArgs.action);
 
                     // Format criteria for display
@@ -1351,6 +1404,7 @@ async function main() {
                         };
                     } catch (error: any) {
                         return {
+                            isError: true,
                             content: [
                                 {
                                     type: "text",
@@ -1680,6 +1734,11 @@ async function main() {
                         mimeType: validatedArgs.mimeType,
                         threadId: threadId,
                         inReplyTo: originalMessageId,
+                        // Passing inReplyTo skips handleEmailAction's thread-based header
+                        // resolution, so the chain built above must be passed explicitly.
+                        // Without it References collapses to the last Message-ID alone and
+                        // clients lose the conversation grouping on deep threads.
+                        references: references,
                         attachments: validatedArgs.attachments,
                         inlineImages: validatedArgs.inlineImages,
                     };
@@ -1732,7 +1791,10 @@ async function main() {
                     throw new Error(`Unknown tool: ${name}`);
             }
         } catch (error: any) {
+            // Tool failures must be flagged with isError; without it clients treat the
+            // "Error: ..." text as a successful result.
             return {
+                isError: true,
                 content: [
                     {
                         type: "text",

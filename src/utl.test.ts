@@ -69,6 +69,87 @@ describe('Email threading headers', () => {
     });
 });
 
+describe('Body transfer encoding', () => {
+    // Extract the body of the last MIME part (headers end at the first blank line)
+    function getPartBody(raw: string): string {
+        const idx = raw.indexOf('\r\n\r\n');
+        return raw.slice(idx + 4);
+    }
+
+    it('keeps 7bit for ASCII-only plain bodies', () => {
+        const raw = createEmailMessage({
+            to: ['test@example.com'],
+            subject: 'ASCII',
+            body: 'Plain ASCII body',
+        });
+
+        expect(raw).toContain('Content-Transfer-Encoding: 7bit');
+        expect(getPartBody(raw)).toBe('Plain ASCII body');
+    });
+
+    it('uses base64 for non-ASCII plain bodies and round-trips the text', () => {
+        const body = 'こんにちは、これはテスト本文です。';
+        const raw = createEmailMessage({
+            to: ['test@example.com'],
+            subject: '日本語件名',
+            body,
+        });
+
+        expect(raw).toContain('Content-Transfer-Encoding: base64');
+        expect(raw).not.toContain('Content-Transfer-Encoding: 7bit');
+        const decoded = Buffer.from(getPartBody(raw).replace(/\r\n/g, ''), 'base64').toString('utf8');
+        expect(decoded).toBe(body);
+    });
+
+    it('uses base64 for non-ASCII HTML-only bodies', () => {
+        // Supplying htmlBody promotes the message to multipart/alternative, so the
+        // HTML-only branch is exercised with body alone.
+        const htmlBody = '<p>日本語の HTML 本文</p>';
+        const raw = createEmailMessage({
+            to: ['test@example.com'],
+            subject: 'HTML',
+            mimeType: 'text/html',
+            body: htmlBody,
+        });
+
+        expect(raw).toContain('Content-Type: text/html; charset=UTF-8');
+        expect(raw).toContain('Content-Transfer-Encoding: base64');
+        const decoded = Buffer.from(getPartBody(raw).replace(/\r\n/g, ''), 'base64').toString('utf8');
+        expect(decoded).toBe(htmlBody);
+    });
+
+    it('encodes each part independently in multipart/alternative', () => {
+        const body = '日本語テキスト';
+        const htmlBody = '<p>ASCII html</p>';
+        const raw = createEmailMessage({
+            to: ['test@example.com'],
+            subject: 'mixed',
+            mimeType: 'text/html',
+            body,
+            htmlBody,
+        });
+
+        expect(raw).toContain('Content-Transfer-Encoding: base64');
+        expect(raw).toContain('Content-Transfer-Encoding: 7bit');
+        expect(raw).toContain(Buffer.from(body, 'utf8').toString('base64'));
+        expect(raw).toContain(htmlBody);
+    });
+
+    it('wraps long base64 payloads at 76 characters', () => {
+        const raw = createEmailMessage({
+            to: ['test@example.com'],
+            subject: 'long',
+            body: 'あ'.repeat(500),
+        });
+
+        const lines = getPartBody(raw).split('\r\n').filter(Boolean);
+        expect(lines.length).toBeGreaterThan(1);
+        for (const line of lines) {
+            expect(line.length).toBeLessThanOrEqual(76);
+        }
+    });
+});
+
 describe('Source verification', () => {
     it('createEmailWithNodemailer uses references field with inReplyTo fallback', () => {
         const source = fs.readFileSync(path.join(srcDir, 'utl.ts'), 'utf-8');
@@ -81,6 +162,13 @@ describe('Source verification', () => {
         expect(source).toContain('gmail.users.threads.get');
         expect(source).toContain('validatedArgs.inReplyTo = lastMessageId');
         expect(source).toContain("validatedArgs.references = allMessageIds.join(' ')");
+    });
+
+    it('reply_all forwards the built References chain to handleEmailAction', () => {
+        const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
+        const replyAllBlock = source.slice(source.indexOf('case "reply_all"'), source.indexOf('case "modify_thread"'));
+        expect(replyAllBlock).toContain('const references = buildReferencesHeader(');
+        expect(replyAllBlock).toContain('references: references');
     });
 
     it('read_email returns Message-ID', () => {
