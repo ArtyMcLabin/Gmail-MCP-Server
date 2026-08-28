@@ -18,8 +18,9 @@ import {createEmailMessage, createEmailWithNodemailer, needsRawBuilder} from "./
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
+import { addFwdPrefix, collectForwardAttachments, assertForwardAttachmentsWithinLimit, buildForwardedTextBody, buildForwardedHtmlBody } from "./forward-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema, ForwardEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { resolveToolPrefix } from "./tool-prefix.js";
 
@@ -1693,6 +1694,84 @@ async function main() {
                             {
                                 type: "text",
                                 text: `Reply-all sent successfully!\nTo: ${replyTo.join(', ')}${replyCc.length > 0 ? `\nCC: ${replyCc.join(', ')}` : ''}\nSubject: ${replySubject}\nThread ID: ${threadId}`,
+                            },
+                        ],
+                    };
+                }
+
+                case "forward_email": {
+                    const validatedArgs = ForwardEmailSchema.parse(args);
+
+                    // Fetch the original email: headers, bodies, and the MIME
+                    // tree needed to locate attachment parts.
+                    const originalEmail = await gmail.users.messages.get({
+                        userId: 'me',
+                        id: validatedArgs.messageId,
+                        format: 'full',
+                    });
+
+                    const payload = originalEmail.data.payload;
+                    const { subject, from, to, cc, date } = extractHeaders(payload);
+                    const { text: originalText, html: originalHtml } = extractEmailContent(
+                        payload as GmailMessagePart || {}
+                    );
+
+                    const headerFields = { from, date, subject, to, cc: cc || undefined };
+
+                    // Carry attachments and inline images over unless opted out.
+                    const rawAttachments: Array<Record<string, unknown>> = [];
+                    if (validatedArgs.includeAttachments) {
+                        const refs = collectForwardAttachments(payload);
+                        assertForwardAttachmentsWithinLimit(refs);
+
+                        for (const ref of refs) {
+                            const attachment = await gmail.users.messages.attachments.get({
+                                userId: 'me',
+                                messageId: validatedArgs.messageId,
+                                id: ref.attachmentId,
+                            });
+
+                            const data = attachment.data.data;
+                            if (!data) continue;
+
+                            rawAttachments.push({
+                                filename: ref.filename,
+                                // Gmail returns base64url; nodemailer expects standard base64.
+                                content: data.replace(/-/g, '+').replace(/_/g, '/'),
+                                contentType: ref.mimeType,
+                                ...(ref.cid ? { cid: ref.cid } : {}),
+                            });
+                        }
+                    }
+
+                    // Mirror whatever the original message had: an HTML original
+                    // is forwarded as HTML so its formatting and any inline
+                    // images survive, otherwise plain text.
+                    const hasHtml = Boolean(originalHtml);
+                    const emailArgs = {
+                        to: validatedArgs.to,
+                        cc: validatedArgs.cc,
+                        bcc: validatedArgs.bcc,
+                        from: validatedArgs.from,
+                        subject: addFwdPrefix(subject),
+                        body: buildForwardedTextBody(headerFields, originalText, validatedArgs.body),
+                        htmlBody: hasHtml
+                            ? buildForwardedHtmlBody(headerFields, originalHtml, validatedArgs.htmlBody)
+                            : undefined,
+                        mimeType: hasHtml ? 'multipart/alternative' : 'text/plain',
+                        rawAttachments,
+                        // Deliberately no threadId / inReplyTo: a forward starts a
+                        // new conversation with the new recipients rather than
+                        // appending to the original thread.
+                    };
+
+                    await handleEmailAction("send", emailArgs);
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Email forwarded successfully!\nTo: ${validatedArgs.to.join(', ')}${validatedArgs.cc?.length ? `\nCC: ${validatedArgs.cc.join(', ')}` : ''}\nSubject: ${addFwdPrefix(subject)}\nAttachments carried over: ${rawAttachments.length}`,
                             },
                         ],
                     };

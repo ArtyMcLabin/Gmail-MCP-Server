@@ -286,7 +286,7 @@ The server automatically filters available tools based on your authorized scopes
 |-------|---------------------|
 | `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
-| `send_email`, `draft_email`, `reply_all`, `send_draft` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
+| `send_email`, `draft_email`, `reply_all`, `forward_email`, `send_draft` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
 | `delete_draft`, `update_draft` | `gmail.modify` or `gmail.compose` |
 | `modify_email`, `batch_modify_emails`, `modify_thread`, `report_phishing`, `batch_report_phishing` | `gmail.modify` |
 | `delete_email`, `batch_delete_emails` | `gmail.full` (`https://mail.google.com/`) |
@@ -768,6 +768,46 @@ send_draft(draftId)          // atomic send + draft removal
 ```
 
 Or abort: `delete_draft(draftId)`.
+
+### 27. Forward Email (`forward_email`)
+Forwards an existing email to new recipients. Fetches the original message, prepends the standard `---------- Forwarded message ----------` header block, and carries attachments and inline images over by default.
+
+**How it works:**
+1. Fetches the original email by `messageId`
+2. Prefixes the subject with `Fwd:` (skipped when it already starts with `Fwd:` or `Fw:`, so chained forwards don't stack)
+3. Quotes the original From/Date/Subject/To/Cc above the original body
+4. Re-attaches every attachment part; inline images keep their `Content-ID` so `cid:` references in the quoted HTML still resolve
+5. Sends via the existing `send_email` pipeline
+
+A forward starts a new conversation rather than appending to the original thread, so no `threadId` or `In-Reply-To` is set.
+
+```json
+{
+  "messageId": "182ab45cd67ef",
+  "to": ["colleague@example.com"],
+  "body": "FYI - the invoice we discussed."
+}
+```
+
+**Without attachments** (useful when the original carries a large payload):
+```json
+{
+  "messageId": "182ab45cd67ef",
+  "to": ["colleague@example.com"],
+  "includeAttachments": false
+}
+```
+
+Parameters:
+- `messageId` (required): ID of the email to forward
+- `to` (required): List of recipient email addresses
+- `cc`, `bcc` (optional): Additional recipients
+- `from` (optional): Send-as alias
+- `body` (optional): Note placed above the quoted original
+- `htmlBody` (optional): HTML version of that note; only used when the original has an HTML body
+- `includeAttachments` (optional, default `true`): Carry the original's attachments and inline images over
+
+Attachments are buffered in memory while the message is assembled, so the combined size is capped at 25 MB (Gmail's own send ceiling). Above that the tool fails with a clear error rather than an opaque API rejection; use `includeAttachments: false` to forward the text alone.
 
 ## Filter Management Features
 
