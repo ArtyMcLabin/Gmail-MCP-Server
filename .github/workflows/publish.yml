@@ -2,7 +2,20 @@ name: Publish release
 
 # Publishes @artymclabin/gmail-mcp everywhere when a v* tag is pushed:
 # npm -> official MCP Registry (OIDC) -> Smithery (.mcpb bundle).
-# Secrets: NPM_TOKEN, SMITHERY_API_KEY.
+# Secrets: SMITHERY_API_KEY. (npm needs none - see below.)
+#
+# 🚨 THE npm JOB NO LONGER USES A TOKEN (2026-08-12). It published with
+# NODE_AUTH_TOKEN: secrets.NPM_TOKEN, a long-lived credential that could publish
+# under this account from anywhere it leaked to - and npm is switching that off
+# for publishing in Jan 2027, so it was a dated mechanism as well as a standing
+# risk. npm now trusts THIS repository and THIS workflow file directly and the
+# runner mints a short-lived OIDC token per run, the same way the MCP Registry
+# job below already worked.
+#
+# 🚨 The trust is registered on npmjs.com against the exact filename
+# `publish.yml` and repo `ArtyMcLabin/Gmail-MCP-Server`. Renaming or moving this
+# file makes npm refuse the run. Change it in both places or not at all.
+# The NPM_TOKEN repository secret can now be deleted.
 on:
   push:
     tags: ['v*']
@@ -20,11 +33,12 @@ jobs:
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm >= 11.5.1; the runner image ships older, and
+      # an older npm falls back to looking for a token that no longer exists.
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm test
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   mcp-registry:
     needs: npm
