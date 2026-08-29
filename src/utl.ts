@@ -157,6 +157,25 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         });
     }
 
+    // In-memory parts carried over from another message (forward_email). These
+    // never touch the filesystem: the bytes come straight from the Gmail API.
+    // A part keeping its `cid` stays inline so cid: references in the quoted
+    // HTML body still resolve for the recipient.
+    for (const part of (validatedArgs.rawAttachments || [])) {
+        const entry: Record<string, unknown> = {
+            filename: part.filename,
+            content: part.content,
+            encoding: 'base64',
+        };
+        if (part.contentType) {
+            entry.contentType = part.contentType;
+        }
+        if (part.cid) {
+            entry.cid = sanitizeHeaderValue(String(part.cid));
+        }
+        attachments.push(entry);
+    }
+
     // Inline images: nodemailer emits a multipart/related container and sets
     // Content-ID + Content-Disposition: inline for any attachment carrying a `cid`.
     for (const img of inlineImages) {
@@ -217,14 +236,15 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
 }
 
 /**
- * Decide which email builder to use. Messages carrying file attachments or
- * inline images need the nodemailer-based raw builder (multipart/mixed and
- * multipart/related); plain or simple HTML mail uses the lightweight
- * createEmailMessage() builder.
+ * Decide which email builder to use. Messages carrying file attachments,
+ * inline images, or parts carried over from a forwarded message need the
+ * nodemailer-based raw builder (multipart/mixed and multipart/related); plain
+ * or simple HTML mail uses the lightweight createEmailMessage() builder.
  */
 export function needsRawBuilder(args: any): boolean {
     const hasAttachments = Array.isArray(args?.attachments) && args.attachments.length > 0;
     const hasInlineImages = Array.isArray(args?.inlineImages) && args.inlineImages.length > 0;
-    return hasAttachments || hasInlineImages;
+    const hasRawAttachments = Array.isArray(args?.rawAttachments) && args.rawAttachments.length > 0;
+    return hasAttachments || hasInlineImages || hasRawAttachments;
 }
 
