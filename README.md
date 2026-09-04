@@ -38,6 +38,7 @@ There's a downstream fork that took this in the **maximalist** direction. I'm no
 - **Download email tool** - `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
 - **Durable OAuth sessions** - `refresh_token` is persisted across restarts, ending the hourly re-auth loop ([PR #35](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/35) by [@BrentBaccala](https://github.com/BrentBaccala))
 - **Custom OAuth callback port** - the auth listener derives port and path from your callback URL instead of hardcoding 3000 ([PR #41](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/41) by [@soapergem](https://github.com/soapergem))
+- **Authenticated HTTP transport** - `--http` runs the server as a stateless Streamable HTTP service (bearer-key auth, loopback by default) so one process serves every MCP client instead of each client spawning its own copy ([details](#http-transport-streamable-http-stateless))
 - **Safe permanent-delete gating** - `delete_email`/`batch_delete_emails` require the opt-in `gmail.full` scope (which also satisfies all other mail scopes), so default auth stays least-privilege ([PR #39](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/39) by [@caioribeiroclw-pixel](https://github.com/caioribeiroclw-pixel))
 
 All features are production-tested in daily use.
@@ -350,6 +351,116 @@ node dist/index.js auth --scopes=gmail.modify,gmail.settings.basic
 ```
 
 This enables all 23 tools including sending emails, managing labels, creating filters, reply-all, thread operations, phishing reports, and batch operations.
+
+## HTTP Transport (Streamable HTTP, stateless)
+
+Besides the default stdio transport, the server can run as a long-lived HTTP service speaking MCP [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports). One process then serves every client - Claude Code, Claude Desktop, an editor, a script - instead of each client spawning its own copy.
+
+```bash
+npm run start:http              # 127.0.0.1:9101, bearer auth on
+node dist/index.js --http --port=9101 --host=127.0.0.1
+```
+
+The server is **stateless**: `sessionIdGenerator` is undefined, no session ids are issued, and each request builds its own `Server` + transport pair. There is nothing to resume, nothing to expire, and a restart is invisible to clients. `GET /mcp` and `DELETE /mcp` return 405 for that reason - stateless mode has no standalone SSE stream to attach to.
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/mcp` | POST | yes | MCP JSON-RPC (SSE response by default) |
+| `/health` | GET | no | liveness probe |
+
+### Authentication
+
+Every `/mcp` request must present the API key:
+
+```
+Authorization: Bearer <key>
+```
+
+`X-API-Key: <key>` is accepted as an alternative. Keys are compared in constant time. The key is resolved in this order:
+
+1. `GMAIL_MCP_API_KEY`
+2. `~/.gmail-mcp/http-api-key` (path overridable with `GMAIL_MCP_API_KEY_PATH`)
+3. generated on first start, written to that file with mode `0600`, and printed to stderr
+
+`--no-auth` disables authentication, and the server refuses to start with it on any non-loopback bind.
+
+### Flags and environment variables
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `--http` | `GMAIL_MCP_HTTP=1` | off | run HTTP instead of stdio |
+| `--port=N` | `GMAIL_MCP_PORT` | `9101` | listen port (`0` = ephemeral) |
+| `--host=H` | `GMAIL_MCP_HOST` | `127.0.0.1` | bind address |
+| `--no-auth` | `GMAIL_MCP_NO_AUTH=1` | off | disable bearer auth (loopback only) |
+| `--json-response` | `GMAIL_MCP_JSON_RESPONSE=1` | off | plain JSON responses instead of SSE |
+| - | `GMAIL_MCP_API_KEY` | - | API key |
+| - | `GMAIL_MCP_API_KEY_PATH` | `~/.gmail-mcp/http-api-key` | key file location |
+| - | `GMAIL_MCP_ALLOWED_ORIGINS` | empty | comma-separated browser origins to accept |
+| - | `GMAIL_MCP_MAX_BODY_BYTES` | `8388608` | request body cap |
+
+Requests carrying an `Origin` header are rejected unless that origin is listed, which blocks DNS-rebinding attacks from a browser tab. Non-browser clients send no `Origin` and are unaffected.
+
+### Security notes
+
+- The default bind is loopback. Exposing the port means exposing full Gmail access - the server holds your OAuth credentials, so anyone with the key can read and send your mail.
+- Off-loopback traffic is plain HTTP. Put it behind TLS (a reverse proxy or a tunnel) and use `--scopes=gmail.readonly` where that is enough.
+- Anything storing the key (client config, shell profile) should be mode `0600`.
+
+### Client configuration
+
+```bash
+claude mcp add --transport http gmail http://127.0.0.1:9101/mcp \
+  --scope user \
+  --header "Authorization: Bearer $(cat ~/.gmail-mcp/http-api-key)"
+```
+
+Or in `.mcp.json`, keeping the key out of the file with environment expansion:
+
+```json
+{
+  "mcpServers": {
+    "gmail": {
+      "type": "http",
+      "url": "http://127.0.0.1:9101/mcp",
+      "headers": { "Authorization": "Bearer ${GMAIL_MCP_API_KEY}" }
+    }
+  }
+}
+```
+
+### Keeping it running (macOS launchd)
+
+Save as `~/Library/LaunchAgents/dev.frst.gmail-mcp.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.frst.gmail-mcp.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.frst.gmail-mcp</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/node</string>
+		<string>/absolute/path/to/Gmail-MCP-Server/dist/index.js</string>
+		<string>--http</string>
+		<string>--port=9101</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/absolute/path/to/Gmail-MCP-Server</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/gmail-mcp.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/gmail-mcp.err.log</string>
+</dict>
+</plist>
+```
+
+Use an absolute node path that survives shell changes - a version-manager shim path (fnm, nvm) is per-shell and will not resolve under launchd.
 
 ### Running multiple instances (tool-name prefix)
 

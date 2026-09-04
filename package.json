@@ -12,6 +12,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
+    "start:http": "node dist/index.js --http",
     "auth": "node dist/index.js auth",
     "test": "vitest run",
     "test:watch": "vitest",
