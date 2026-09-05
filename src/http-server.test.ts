@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import net from 'node:net';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -11,6 +15,7 @@ import {
     isAuthorized,
     isOriginAllowed,
     isLoopbackHost,
+    resolveApiKey,
     DEFAULT_HTTP_PORT,
     DEFAULT_HTTP_HOST,
     type StartedHttpServer,
@@ -75,6 +80,11 @@ describe('parseHttpOptions', () => {
         });
     });
 
+    it('falls back to the default host when --host is given an empty value', () => {
+        // An empty bind address makes Node listen on every interface - never silently.
+        expect(parseHttpOptions(['--http', '--host='])?.host).toBe(DEFAULT_HTTP_HOST);
+    });
+
     it('rejects a nonsense port', () => {
         expect(() => parseHttpOptions(['--http', '--port=notaport'])).toThrow(/Invalid port/);
         expect(() => parseHttpOptions(['--http', '--port=99999'])).toThrow(/Invalid port/);
@@ -113,6 +123,7 @@ describe('auth helpers', () => {
         expect(isLoopbackHost('127.0.0.1')).toBe(true);
         expect(isLoopbackHost('localhost')).toBe(true);
         expect(isLoopbackHost('::1')).toBe(true);
+        expect(isLoopbackHost('::ffff:127.0.0.1')).toBe(true);
         expect(isLoopbackHost('0.0.0.0')).toBe(false);
         expect(isLoopbackHost('192.168.1.10')).toBe(false);
     });
@@ -245,7 +256,7 @@ describe('startHttpServer', () => {
         expect(await response.json()).toMatchObject({ jsonrpc: '2.0', id: 1, result: { serverInfo: {} } });
     });
 
-    it('rejects an oversized body', async () => {
+    it('answers an oversized body with 413 instead of resetting the connection', async () => {
         started = await startHttpServer({
             host: '127.0.0.1',
             port: 0,
@@ -258,13 +269,121 @@ describe('startHttpServer', () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { pad: 'x'.repeat(500) } }),
-        }).catch(error => error as Error);
+        });
 
-        // Node may surface the mid-stream abort as a fetch failure; either way the request must not succeed.
-        if (response instanceof Error) {
-            expect(response.message).toBeTruthy();
-        } else {
-            expect(response.status).toBe(413);
-        }
+        expect(response.status).toBe(413);
+        expect(await response.json()).toMatchObject({ error: { code: -32700 } });
+    });
+
+    it('answers malformed JSON with 400 before the SDK sees it', async () => {
+        started = await startHttpServer({ host: '127.0.0.1', port: 0, apiKey: API_KEY, createServer: createStubServer });
+
+        const response = await fetch(started.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
+            body: '{"jsonrpc": "2.0", oops',
+        });
+
+        expect(response.status).toBe(400);
+    });
+
+    it('survives a malformed Host header and keeps serving', async () => {
+        started = await startHttpServer({ host: '127.0.0.1', port: 0, apiKey: API_KEY, createServer: createStubServer });
+
+        // A Host value that is not a valid URL authority. Reaches the listener before any auth check.
+        const raw = await new Promise<string>((resolve, reject) => {
+            const socket = net.connect(started!.port, '127.0.0.1', () => {
+                socket.write('GET /health HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n');
+            });
+            let data = '';
+            socket.on('data', chunk => { data += chunk.toString(); });
+            socket.on('close', () => resolve(data));
+            socket.on('error', reject);
+            setTimeout(() => reject(new Error('timed out waiting for a response')), 4000);
+        });
+
+        expect(raw).toMatch(/^HTTP\/1\.1 \d{3}/);
+
+        // The process must still be up and the listener must still answer normal traffic.
+        const health = await fetch(`${started.url.replace('/mcp', '')}/health`);
+        expect(health.status).toBe(200);
+    });
+
+    it('returns 500 and stays alive when building the MCP server throws', async () => {
+        let calls = 0;
+        started = await startHttpServer({
+            host: '127.0.0.1',
+            port: 0,
+            apiKey: API_KEY,
+            createServer: () => {
+                calls += 1;
+                if (calls === 1) throw new Error('credentials went missing');
+                return createStubServer();
+            },
+        });
+
+        const request = () => fetch(started!.url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json, text/event-stream',
+                Authorization: `Bearer ${API_KEY}`,
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        });
+
+        expect((await request()).status).toBe(500);
+        expect((await request()).status).toBe(200);
+    });
+});
+
+describe('resolveApiKey', () => {
+    let keyDir: string;
+    const savedEnv = { ...process.env };
+
+    beforeEach(() => {
+        keyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gmail-mcp-key-'));
+        delete process.env.GMAIL_MCP_API_KEY;
+        process.env.GMAIL_MCP_API_KEY_PATH = path.join(keyDir, 'nested', 'http-api-key');
+    });
+
+    afterEach(() => {
+        process.env = { ...savedEnv };
+        fs.rmSync(keyDir, { recursive: true, force: true });
+    });
+
+    it('prefers an explicit key, then the environment', () => {
+        process.env.GMAIL_MCP_API_KEY = 'from-env';
+        expect(resolveApiKey('explicit')).toBe('explicit');
+        expect(resolveApiKey()).toBe('from-env');
+        expect(fs.existsSync(process.env.GMAIL_MCP_API_KEY_PATH!)).toBe(false);
+    });
+
+    it('generates a key once, at mode 0600, and reuses it', () => {
+        const first = resolveApiKey();
+        expect(first).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+
+        const keyPath = process.env.GMAIL_MCP_API_KEY_PATH!;
+        expect(fs.statSync(keyPath).mode & 0o777).toBe(0o600);
+        expect(resolveApiKey()).toBe(first);
+    });
+
+    it('regenerates when the key file exists but is empty', () => {
+        const keyPath = process.env.GMAIL_MCP_API_KEY_PATH!;
+        fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+        fs.writeFileSync(keyPath, '   \n');
+
+        const key = resolveApiKey();
+        expect(key.length).toBeGreaterThan(0);
+        expect(fs.readFileSync(keyPath, 'utf8').trim()).toBe(key);
+    });
+
+    it('never hands back a key that disagrees with the file, even on a racing start', () => {
+        // Both callers race to create the same file; the loser must adopt the winner's key.
+        const keys = [resolveApiKey(), resolveApiKey(), resolveApiKey()];
+        const onDisk = fs.readFileSync(process.env.GMAIL_MCP_API_KEY_PATH!, 'utf8').trim();
+
+        expect(new Set(keys).size).toBe(1);
+        expect(keys[0]).toBe(onDisk);
     });
 });

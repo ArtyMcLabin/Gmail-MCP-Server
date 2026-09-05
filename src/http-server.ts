@@ -24,7 +24,11 @@ export const DEFAULT_HTTP_HOST = '127.0.0.1';
 export const MCP_PATH = '/mcp';
 
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
-const API_KEY_PATH = process.env.GMAIL_MCP_API_KEY_PATH || path.join(CONFIG_DIR, 'http-api-key');
+
+/** Read per call rather than at import time so the path stays overridable (and testable). */
+function apiKeyPath(): string {
+    return process.env.GMAIL_MCP_API_KEY_PATH || path.join(CONFIG_DIR, 'http-api-key');
+}
 
 /** Max accepted request body. Gmail attachments are sent as file paths, so bodies stay small. */
 const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -56,13 +60,14 @@ function envFlag(name: string): boolean {
     return value === '1' || value === 'true' || value === 'yes';
 }
 
+/** Returns the flag's value, treating an empty value as absent - an empty bind address means "all interfaces". */
 function flagValue(argv: string[], flag: string): string | undefined {
     const inline = argv.find(arg => arg.startsWith(`${flag}=`));
-    if (inline) return inline.slice(flag.length + 1);
+    if (inline) return inline.slice(flag.length + 1) || undefined;
 
     const index = argv.indexOf(flag);
     if (index !== -1 && index + 1 < argv.length && !argv[index + 1].startsWith('-')) {
-        return argv[index + 1];
+        return argv[index + 1] || undefined;
     }
     return undefined;
 }
@@ -103,9 +108,8 @@ export function parseHttpOptions(argv: string[]): HttpOptions | null {
 }
 
 export function isLoopbackHost(host: string): boolean {
-    const normalized = host.replace(/^\[|\]$/g, '').toLowerCase();
-    return normalized === '127.0.0.1'
-        || normalized === 'localhost'
+    const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().replace(/^::ffff:/, '');
+    return normalized === 'localhost'
         || normalized === '::1'
         || normalized.startsWith('127.');
 }
@@ -125,16 +129,32 @@ export function resolveApiKey(explicit?: string): string {
     const fromEnv = explicit || process.env.GMAIL_MCP_API_KEY;
     if (fromEnv) return fromEnv;
 
-    if (fs.existsSync(API_KEY_PATH)) {
-        const stored = fs.readFileSync(API_KEY_PATH, 'utf8').trim();
-        if (stored) return stored;
+    const keyPath = apiKeyPath();
+
+    // Creation is exclusive ('wx'): if two instances start at once, the loser adopts the
+    // winner's key instead of overwriting it and 401ing every client already holding it.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        if (fs.existsSync(keyPath)) {
+            const stored = fs.readFileSync(keyPath, 'utf8').trim();
+            if (stored) return stored;
+            fs.rmSync(keyPath, { force: true });
+        }
+
+        const generated = crypto.randomBytes(32).toString('base64url');
+        fs.mkdirSync(path.dirname(keyPath), { recursive: true, mode: 0o700 });
+
+        try {
+            fs.writeFileSync(keyPath, `${generated}\n`, { mode: 0o600, flag: 'wx' });
+        } catch (error: any) {
+            if (error?.code === 'EEXIST') continue;
+            throw error;
+        }
+
+        console.error(`Generated a new HTTP API key at ${keyPath}`);
+        return generated;
     }
 
-    const generated = crypto.randomBytes(32).toString('base64url');
-    fs.mkdirSync(path.dirname(API_KEY_PATH), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(API_KEY_PATH, `${generated}\n`, { mode: 0o600 });
-    console.error(`Generated a new HTTP API key at ${API_KEY_PATH}`);
-    return generated;
+    throw new Error(`Could not establish an API key at ${keyPath}`);
 }
 
 /** Extracts a presented key from Authorization: Bearer or X-API-Key. */
@@ -177,6 +197,25 @@ function jsonRpcError(code: number, message: string) {
     return { jsonrpc: '2.0', error: { code, message }, id: null };
 }
 
+/**
+ * Routes on the request target alone. The Host header is attacker-controlled and need
+ * not be a valid URL authority, so it must never be fed to the URL parser.
+ */
+export function requestPath(target: string | undefined): string {
+    const withoutQuery = (target || '/').split(/[?#]/, 1)[0];
+
+    // Absolute-form targets ("GET http://host/mcp") are legal; fall back to the raw value.
+    if (/^https?:\/\//i.test(withoutQuery)) {
+        try {
+            return new URL(withoutQuery).pathname;
+        } catch {
+            return withoutQuery;
+        }
+    }
+
+    return withoutQuery.startsWith('/') ? withoutQuery : `/${withoutQuery}`;
+}
+
 function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string> {
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
@@ -185,8 +224,9 @@ function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string> 
         req.on('data', (chunk: Buffer) => {
             size += chunk.length;
             if (size > maxBytes) {
+                // Stop buffering but leave the socket alive so the 413 can actually be written.
+                req.pause();
                 reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
-                req.destroy();
                 return;
             }
             chunks.push(chunk);
@@ -221,16 +261,16 @@ export async function startHttpServer(
 
     const apiKey = noAuth ? undefined : resolveApiKey(options.apiKey);
 
-    const httpServer = http.createServer(async (req, res) => {
-        const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+        const pathname = requestPath(req.url);
 
-        if (url.pathname === '/health') {
+        if (pathname === '/health') {
             sendJson(res, 200, { status: 'ok', transport: 'streamable-http', stateless: true });
             return;
         }
 
-        if (url.pathname !== MCP_PATH) {
-            sendJson(res, 404, jsonRpcError(-32601, `Not found: ${url.pathname}`));
+        if (pathname !== MCP_PATH) {
+            sendJson(res, 404, jsonRpcError(-32601, `Not found: ${pathname}`));
             return;
         }
 
@@ -265,8 +305,15 @@ export async function startHttpServer(
             parsedBody = raw ? JSON.parse(raw) : undefined;
         } catch (error: any) {
             if (res.headersSent) return;
-            const status = error?.statusCode === 413 ? 413 : 400;
-            sendJson(res, status, jsonRpcError(-32700, error?.message || 'Parse error'));
+
+            if (error?.statusCode === 413) {
+                // The rest of the body is still in flight; answer, then drop the connection.
+                res.on('finish', () => req.destroy());
+                sendJson(res, 413, jsonRpcError(-32700, 'Request body too large'), { Connection: 'close' });
+                return;
+            }
+
+            sendJson(res, 400, jsonRpcError(-32700, 'Parse error'));
             return;
         }
 
@@ -281,15 +328,21 @@ export async function startHttpServer(
             void server.close();
         });
 
-        try {
-            await server.connect(transport);
-            await transport.handleRequest(req, res, parsedBody);
-        } catch (error: any) {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, parsedBody);
+    };
+
+    const httpServer = http.createServer((req, res) => {
+        // Nothing in here may reject: an unhandled rejection in a request listener
+        // takes the whole process down, and the earliest code runs before any auth.
+        handleRequest(req, res).catch((error: unknown) => {
             console.error('Error handling MCP request:', error);
             if (!res.headersSent) {
                 sendJson(res, 500, jsonRpcError(-32603, 'Internal server error'));
+            } else if (!res.writableEnded) {
+                res.end();
             }
-        }
+        });
     });
 
     await new Promise<void>((resolve, reject) => {

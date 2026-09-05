@@ -404,6 +404,7 @@ Requests carrying an `Origin` header are rejected unless that origin is listed, 
 ### Security notes
 
 - The default bind is loopback. Exposing the port means exposing full Gmail access - the server holds your OAuth credentials, so anyone with the key can read and send your mail.
+- `--no-auth` is not "safe because it's localhost". On a shared machine, every other local user can reach a loopback port, and without a key they get your whole mailbox. The `0600` key file is what keeps them out - leave auth on.
 - Off-loopback traffic is plain HTTP. Put it behind TLS (a reverse proxy or a tunnel) and use `--scopes=gmail.readonly` where that is enough.
 - Anything storing the key (client config, shell profile) should be mode `0600`.
 
