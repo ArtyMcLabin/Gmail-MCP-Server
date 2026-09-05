@@ -16,7 +16,7 @@ Also on the [official MCP Registry](https://registry.modelcontextprotocol.io) (`
 
 ## Philosophy
 
-This fork is **lean and pragmatic**. It's a local stdio MCP server - you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" - not "defend a hosted multi-tenant service". I keep dependencies minimal. I use this daily in my own Claude Code workflow - if I wouldn't run it or maintain it myself, it doesn't go in.
+This fork is **lean and pragmatic**. It's a local MCP server - stdio by default, with an opt-in loopback HTTP mode - you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" - not "defend a hosted multi-tenant service". I keep dependencies minimal. I use this daily in my own Claude Code workflow - if I wouldn't run it or maintain it myself, it doesn't go in.
 
 There's a downstream fork that took this in the **maximalist** direction. I'm not affiliated with its maintainer and I don't track its security or features - use it at your own risk: **[klodr/gmail-mcp](https://github.com/klodr/gmail-mcp)**. If that's the philosophy you want, go check it out. PRs welcome here as always.
 
@@ -72,6 +72,7 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 - Delete emails
 - **Batch operations for efficiently processing multiple emails at once**
 - Full integration with Gmail API
+- **Optional HTTP transport** - stateless Streamable HTTP on loopback with bearer-key auth, so one process serves every client ([details](#http-transport-streamable-http-stateless))
 - Simple OAuth2 authentication flow with auto browser launch
 - Support for both Desktop and Web application credentials
 - Global credential storage for convenience
