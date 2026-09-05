@@ -18,6 +18,7 @@ import os from 'node:os';
 import type { AddressInfo } from 'node:net';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isHttpRequested } from './http-flag.js';
 
 export const DEFAULT_HTTP_PORT = 9101;
 export const DEFAULT_HTTP_HOST = '127.0.0.1';
@@ -60,6 +61,8 @@ function envFlag(name: string): boolean {
     return value === '1' || value === 'true' || value === 'yes';
 }
 
+export { isHttpRequested };
+
 /** Returns the flag's value, treating an empty value as absent - an empty bind address means "all interfaces". */
 function flagValue(argv: string[], flag: string): string | undefined {
     const inline = argv.find(arg => arg.startsWith(`${flag}=`));
@@ -77,7 +80,7 @@ function flagValue(argv: string[], flag: string): string | undefined {
  * otherwise null, meaning "run stdio".
  */
 export function parseHttpOptions(argv: string[]): HttpOptions | null {
-    if (!argv.includes('--http') && !envFlag('GMAIL_MCP_HTTP')) return null;
+    if (!isHttpRequested(argv)) return null;
 
     const rawPort = flagValue(argv, '--port') ?? process.env.GMAIL_MCP_PORT;
     const port = rawPort === undefined ? DEFAULT_HTTP_PORT : Number(rawPort);

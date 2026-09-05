@@ -21,7 +21,7 @@ import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
-import { parseHttpOptions, startHttpServer } from "./http-server.js";
+import { isHttpRequested } from "./http-flag.js";
 import { resolveToolPrefix } from "./tool-prefix.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -362,9 +362,11 @@ async function main() {
         process.exit(0);
     }
 
-    const httpOptions = parseHttpOptions(process.argv.slice(2));
+    // Loaded only when asked for, so the stdio path never pays for the HTTP stack.
+    if (isHttpRequested(process.argv)) {
+        const { parseHttpOptions, startHttpServer } = await import("./http-server.js");
+        const httpOptions = parseHttpOptions(process.argv.slice(2))!;
 
-    if (httpOptions) {
         await startHttpServer({ ...httpOptions, createServer: createGmailServer });
         return;
     }

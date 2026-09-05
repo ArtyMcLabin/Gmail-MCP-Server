@@ -15,6 +15,7 @@ import {
     isAuthorized,
     isOriginAllowed,
     isLoopbackHost,
+    isHttpRequested,
     resolveApiKey,
     DEFAULT_HTTP_PORT,
     DEFAULT_HTTP_HOST,
@@ -54,6 +55,21 @@ describe('parseHttpOptions', () => {
     it('returns null when HTTP mode is not requested', () => {
         expect(parseHttpOptions([])).toBeNull();
         expect(parseHttpOptions(['auth', '--scopes=gmail.readonly'])).toBeNull();
+    });
+
+    it('shares one trigger predicate with the stdio entry point', () => {
+        // index.ts asks isHttpRequested() before importing this module at all,
+        // so the two must never disagree about what counts as "HTTP mode".
+        expect(isHttpRequested(['--http'])).toBe(true);
+        expect(isHttpRequested([], { GMAIL_MCP_HTTP: '1' })).toBe(true);
+        expect(isHttpRequested([], { GMAIL_MCP_HTTP: 'true' })).toBe(true);
+        expect(isHttpRequested([], { GMAIL_MCP_HTTP: 'yes' })).toBe(true);
+        expect(isHttpRequested([], { GMAIL_MCP_HTTP: '0' })).toBe(false);
+        expect(isHttpRequested(['auth'], {})).toBe(false);
+
+        for (const argv of [['--http'], ['auth'], []]) {
+            expect(parseHttpOptions(argv) !== null).toBe(isHttpRequested(argv, {}));
+        }
     });
 
     it('defaults to loopback and the registered port', () => {
