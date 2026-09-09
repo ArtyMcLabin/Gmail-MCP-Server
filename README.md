@@ -454,6 +454,8 @@ Save as `~/Library/LaunchAgents/dev.frst.gmail-mcp.plist`, then `launchctl boots
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>StandardOutPath</key>
 	<string>/tmp/gmail-mcp.out.log</string>
 	<key>StandardErrorPath</key>
@@ -463,6 +465,10 @@ Save as `~/Library/LaunchAgents/dev.frst.gmail-mcp.plist`, then `launchctl boots
 ```
 
 Use an absolute node path that survives shell changes - a version-manager shim path (fnm, nvm) is per-shell and will not resolve under launchd.
+
+`ProcessType` must be `Interactive`, and it is the one setting here that is easy to get wrong. A long-lived MCP server looks like a background daemon, but `Background` puts the job in a throttled tier: its I/O is rate-limited and it becomes App Nap eligible. Because the server does nothing between requests, macOS pages it out - one instance left idle for several days had 65 MB swapped out - and faulting all of that back in under the throttle took about 12 seconds for a single `initialize`, which is far past the point where an MCP client gives up and reports the server as failed. `/health` answers from the pages still resident, so the server looks alive while every real request times out. `Interactive` exempts the job from CPU and I/O throttling and the problem disappears.
+
+The equivalent on Linux with systemd is a user unit (`~/.config/systemd/user/gmail-mcp.service`) with `Restart=always`; systemd applies no comparable throttling, so no extra setting is needed.
 
 ### Running multiple instances (tool-name prefix)
 
