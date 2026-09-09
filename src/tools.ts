@@ -460,12 +460,42 @@ export const toolDefinitions: ToolDefinition[] = [
   },
 ];
 
+/**
+ * Converted JSON Schemas, keyed on the Zod schema they were built from.
+ *
+ * `tools/list` used to re-run `zodToJsonSchema` over every tool on every call,
+ * which is pure recomputation - the schemas are module-level constants that
+ * cannot change between calls. It costs little once, but stateless HTTP mode
+ * builds a fresh Server per request, so every listing pays it again.
+ *
+ * Keyed on the schema object rather than the tool name so a caller passing any
+ * subset still hits the same entries (the scope filter in the ListTools handler
+ * passes a different subset depending on what the user authorized).
+ *
+ * A WeakMap filled on demand, not an eager conversion at import: the stdio
+ * start path should not pay for tools a client may never list. That is the same
+ * reason index.ts reaches the HTTP stack through a dynamic import.
+ *
+ * The cached value is shared by every caller, so it must be treated as
+ * immutable - toMcpTools returns it by reference.
+ */
+const jsonSchemaCache = new WeakMap<z.ZodType<any>, ReturnType<typeof zodToJsonSchema>>();
+
+function toJsonSchemaCached(schema: z.ZodType<any>) {
+  const cached = jsonSchemaCache.get(schema);
+  if (cached) return cached;
+
+  const converted = zodToJsonSchema(schema);
+  jsonSchemaCache.set(schema, converted);
+  return converted;
+}
+
 // Convert tool definitions to MCP tool format
 export function toMcpTools(tools: ToolDefinition[]) {
   return tools.map(tool => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: zodToJsonSchema(tool.schema),
+    inputSchema: toJsonSchemaCached(tool.schema),
     annotations: tool.annotations,
   }));
 }

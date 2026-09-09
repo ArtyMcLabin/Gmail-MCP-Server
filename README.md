@@ -16,7 +16,7 @@ Also on the [official MCP Registry](https://registry.modelcontextprotocol.io) (`
 
 ## Philosophy
 
-This fork is **lean and pragmatic**. It's a local stdio MCP server - you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" - not "defend a hosted multi-tenant service". I keep dependencies minimal. I use this daily in my own Claude Code workflow - if I wouldn't run it or maintain it myself, it doesn't go in.
+This fork is **lean and pragmatic**. It's a local MCP server - stdio by default, with an opt-in loopback HTTP mode - you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" - not "defend a hosted multi-tenant service". I keep dependencies minimal. I use this daily in my own Claude Code workflow - if I wouldn't run it or maintain it myself, it doesn't go in.
 
 There's a downstream fork that took this in the **maximalist** direction. I'm not affiliated with its maintainer and I don't track its security or features - use it at your own risk: **[klodr/gmail-mcp](https://github.com/klodr/gmail-mcp)**. If that's the philosophy you want, go check it out. PRs welcome here as always.
 
@@ -38,6 +38,7 @@ There's a downstream fork that took this in the **maximalist** direction. I'm no
 - **Download email tool** - `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
 - **Durable OAuth sessions** - `refresh_token` is persisted across restarts, ending the hourly re-auth loop ([PR #35](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/35) by [@BrentBaccala](https://github.com/BrentBaccala))
 - **Custom OAuth callback port** - the auth listener derives port and path from your callback URL instead of hardcoding 3000 ([PR #41](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/41) by [@soapergem](https://github.com/soapergem))
+- **Authenticated HTTP transport** - `--http` runs the server as a stateless Streamable HTTP service (bearer-key auth, loopback by default) so one process serves every MCP client instead of each client spawning its own copy ([details](#http-transport-streamable-http-stateless))
 - **Safe permanent-delete gating** - `delete_email`/`batch_delete_emails` require the opt-in `gmail.full` scope (which also satisfies all other mail scopes), so default auth stays least-privilege ([PR #39](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/39) by [@caioribeiroclw-pixel](https://github.com/caioribeiroclw-pixel))
 
 All features are production-tested in daily use.
@@ -71,6 +72,7 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 - Delete emails
 - **Batch operations for efficiently processing multiple emails at once**
 - Full integration with Gmail API
+- **Optional HTTP transport** - stateless Streamable HTTP on loopback with bearer-key auth, so one process serves every client ([details](#http-transport-streamable-http-stateless))
 - Simple OAuth2 authentication flow with auto browser launch
 - Support for both Desktop and Web application credentials
 - Global credential storage for convenience
@@ -350,6 +352,123 @@ node dist/index.js auth --scopes=gmail.modify,gmail.settings.basic
 ```
 
 This enables all 23 tools including sending emails, managing labels, creating filters, reply-all, thread operations, phishing reports, and batch operations.
+
+## HTTP Transport (Streamable HTTP, stateless)
+
+Besides the default stdio transport, the server can run as a long-lived HTTP service speaking MCP [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports). One process then serves every client - Claude Code, Claude Desktop, an editor, a script - instead of each client spawning its own copy.
+
+```bash
+npm run start:http              # 127.0.0.1:9101, bearer auth on
+node dist/index.js --http --port=9101 --host=127.0.0.1
+```
+
+The server is **stateless**: `sessionIdGenerator` is undefined, no session ids are issued, and each request builds its own `Server` + transport pair. There is nothing to resume, nothing to expire, and a restart is invisible to clients. `GET /mcp` and `DELETE /mcp` return 405 for that reason - stateless mode has no standalone SSE stream to attach to.
+
+| Endpoint | Method | Auth | Purpose |
+| --- | --- | --- | --- |
+| `/mcp` | POST | yes | MCP JSON-RPC (SSE response by default) |
+| `/health` | GET | no | liveness probe |
+
+### Authentication
+
+Every `/mcp` request must present the API key:
+
+```
+Authorization: Bearer <key>
+```
+
+`X-API-Key: <key>` is accepted as an alternative. Keys are compared in constant time. The key is resolved in this order:
+
+1. `GMAIL_MCP_API_KEY`
+2. `~/.gmail-mcp/http-api-key` (path overridable with `GMAIL_MCP_API_KEY_PATH`)
+3. generated on first start, written to that file with mode `0600`, and printed to stderr
+
+`--no-auth` disables authentication, and the server refuses to start with it on any non-loopback bind.
+
+### Flags and environment variables
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `--http` | `GMAIL_MCP_HTTP=1` | off | run HTTP instead of stdio |
+| `--port=N` | `GMAIL_MCP_PORT` | `9101` | listen port (`0` = ephemeral) |
+| `--host=H` | `GMAIL_MCP_HOST` | `127.0.0.1` | bind address |
+| `--no-auth` | `GMAIL_MCP_NO_AUTH=1` | off | disable bearer auth (loopback only) |
+| `--json-response` | `GMAIL_MCP_JSON_RESPONSE=1` | off | plain JSON responses instead of SSE |
+| - | `GMAIL_MCP_API_KEY` | - | API key |
+| - | `GMAIL_MCP_API_KEY_PATH` | `~/.gmail-mcp/http-api-key` | key file location |
+| - | `GMAIL_MCP_ALLOWED_ORIGINS` | empty | comma-separated browser origins to accept |
+| - | `GMAIL_MCP_MAX_BODY_BYTES` | `8388608` | request body cap |
+
+Requests carrying an `Origin` header are rejected unless that origin is listed, which blocks DNS-rebinding attacks from a browser tab. Non-browser clients send no `Origin` and are unaffected.
+
+### Security notes
+
+- The default bind is loopback. Exposing the port means exposing full Gmail access - the server holds your OAuth credentials, so anyone with the key can read and send your mail.
+- `--no-auth` is not "safe because it's localhost". On a shared machine, every other local user can reach a loopback port, and without a key they get your whole mailbox. The `0600` key file is what keeps them out - leave auth on.
+- Off-loopback traffic is plain HTTP. Put it behind TLS (a reverse proxy or a tunnel) and use `--scopes=gmail.readonly` where that is enough.
+- Anything storing the key (client config, shell profile) should be mode `0600`.
+
+### Client configuration
+
+```bash
+claude mcp add --transport http gmail http://127.0.0.1:9101/mcp \
+  --scope user \
+  --header "Authorization: Bearer $(cat ~/.gmail-mcp/http-api-key)"
+```
+
+Or in `.mcp.json`, keeping the key out of the file with environment expansion:
+
+```json
+{
+  "mcpServers": {
+    "gmail": {
+      "type": "http",
+      "url": "http://127.0.0.1:9101/mcp",
+      "headers": { "Authorization": "Bearer ${GMAIL_MCP_API_KEY}" }
+    }
+  }
+}
+```
+
+### Keeping it running (macOS launchd)
+
+Save as `~/Library/LaunchAgents/dev.frst.gmail-mcp.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.frst.gmail-mcp.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.frst.gmail-mcp</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/node</string>
+		<string>/absolute/path/to/Gmail-MCP-Server/dist/index.js</string>
+		<string>--http</string>
+		<string>--port=9101</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/absolute/path/to/Gmail-MCP-Server</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/gmail-mcp.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/gmail-mcp.err.log</string>
+</dict>
+</plist>
+```
+
+Use an absolute node path that survives shell changes - a version-manager shim path (fnm, nvm) is per-shell and will not resolve under launchd.
+
+`ProcessType` must be `Interactive`, and it is the one setting here that is easy to get wrong. A long-lived MCP server looks like a background daemon, but `Background` puts the job in a throttled tier: its I/O is rate-limited and it becomes App Nap eligible. Because the server does nothing between requests, macOS pages it out - one instance left idle for several days had 65 MB swapped out - and faulting all of that back in under the throttle took about 12 seconds for a single `initialize`, which is far past the point where an MCP client gives up and reports the server as failed. `/health` answers from the pages still resident, so the server looks alive while every real request times out. `Interactive` exempts the job from CPU and I/O throttling and the problem disappears.
+
+The equivalent on Linux with systemd is a user unit (`~/.config/systemd/user/gmail-mcp.service`) with `Restart=always`; systemd applies no comparable throttling, so no extra setting is needed.
 
 ### Running multiple instances (tool-name prefix)
 

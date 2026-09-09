@@ -6,7 +6,7 @@ import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { google } from 'googleapis';
+import { google, gmail_v1 } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
@@ -21,6 +21,7 @@ import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
+import { isHttpRequested } from "./http-flag.js";
 import { resolveToolPrefix } from "./tool-prefix.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -299,6 +300,35 @@ async function authenticate(scopes: string[]) {
     });
 }
 
+/**
+ * Builds a fully configured MCP Server instance.
+ *
+ * Called once for stdio, and once per request in stateless HTTP mode - the
+ * Streamable HTTP spec expects a fresh Server/Transport pair per request so
+ * concurrent clients cannot collide on JSON-RPC request ids. Everything the
+ * handlers need (oauth2Client, authorizedScopes) is module-level state shared
+ * across instances, so building one is cheap.
+ */
+export function createGmailServer(): Server {
+    // Initialize Gmail API
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    // Server implementation
+    const server = new Server(
+        {
+            name: "gmail",
+            version: "1.0.0",
+        },
+        {
+            capabilities: {
+                tools: {},
+            },
+        },
+    );
+
+    return configureGmailServer(server, gmail);
+}
+
 // Main function
 async function main() {
     await loadCredentials();
@@ -332,22 +362,24 @@ async function main() {
         process.exit(0);
     }
 
-    // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    // Loaded only when asked for, so the stdio path never pays for the HTTP stack.
+    if (isHttpRequested(process.argv)) {
+        const { parseHttpOptions, startHttpServer } = await import("./http-server.js");
+        const httpOptions = parseHttpOptions(process.argv.slice(2))!;
 
-    // Server implementation
-    const server = new Server(
-        {
-            name: "gmail",
-            version: "1.0.0",
-        },
-        {
-            capabilities: {
-                tools: {},
-            },
-        },
-    );
+        await startHttpServer({ ...httpOptions, createServer: createGmailServer });
+        return;
+    }
 
+    const transport = new StdioServerTransport();
+    await createGmailServer().connect(transport);
+}
+
+/**
+ * Registers the tool handlers on a Server instance. Split out of createGmailServer
+ * so the handler bodies keep a single `gmail` client in scope.
+ */
+function configureGmailServer(server: Server, gmail: gmail_v1.Gmail): Server {
     // Tool handlers
     // Filter available tools based on authorized scopes
     server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -1743,8 +1775,7 @@ async function main() {
         }
     });
 
-    const transport = new StdioServerTransport();
-    server.connect(transport);
+    return server;
 }
 
 main().catch((error) => {
