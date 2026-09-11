@@ -399,27 +399,51 @@ async function main() {
 
                         const threadMessages = threadResponse.data.messages || [];
                         if (threadMessages.length > 0) {
-                            // Collect all Message-ID values for the References chain
+                            // Order by internalDate, NOT by array position.
+                            //
+                            // The array Gmail returns is not reliably chronological, and the
+                            // previous code took threadMessages[length - 1] as the reply
+                            // parent. On a real thread that picked one of our OWN earlier
+                            // sent messages, and a draft anchored to a non-tail parent lists
+                            // in the Drafts panel but never renders inside the conversation.
+                            // That is the recurring "I see it in drafts, I click it, the
+                            // thread has no draft" symptom in
+                            // ArtyMcLabin/PersonalAssistant-ClaudeCode#208.
+                            //
+                            // Messages missing internalDate keep their original relative
+                            // position, so this degrades to the old behaviour rather than
+                            // shuffling anything unpredictably.
+                            const ordered = threadMessages
+                                .map((msg, idx) => ({ msg, idx }))
+                                .sort((a, b) => {
+                                    const da = Number(a.msg.internalDate ?? NaN);
+                                    const db = Number(b.msg.internalDate ?? NaN);
+                                    if (Number.isFinite(da) && Number.isFinite(db) && da !== db) {
+                                        return da - db;
+                                    }
+                                    return a.idx - b.idx;
+                                })
+                                .map((entry) => entry.msg);
+
+                            const messageIdOf = (msg: any): string | undefined =>
+                                (msg?.payload?.headers || []).find(
+                                    (h: any) => h.name?.toLowerCase() === 'message-id'
+                                )?.value ?? undefined;
+
+                            // References chain in chronological order
                             const allMessageIds: string[] = [];
-                            for (const msg of threadMessages) {
-                                const msgHeaders = msg.payload?.headers || [];
-                                const messageIdHeader = msgHeaders.find(
-                                    (h) => h.name?.toLowerCase() === 'message-id'
-                                );
-                                if (messageIdHeader?.value) {
-                                    allMessageIds.push(messageIdHeader.value);
+                            for (const msg of ordered) {
+                                const id = messageIdOf(msg);
+                                if (id) {
+                                    allMessageIds.push(id);
                                 }
                             }
 
-                            // Last message's Message-ID becomes In-Reply-To
-                            const lastMessage = threadMessages[threadMessages.length - 1];
-                            const lastHeaders = lastMessage.payload?.headers || [];
-                            const lastMessageId = lastHeaders.find(
-                                (h) => h.name?.toLowerCase() === 'message-id'
-                            )?.value;
+                            // Newest message's Message-ID becomes In-Reply-To
+                            const newestMessageId = messageIdOf(ordered[ordered.length - 1]);
 
-                            if (lastMessageId) {
-                                validatedArgs.inReplyTo = lastMessageId;
+                            if (newestMessageId) {
+                                validatedArgs.inReplyTo = newestMessageId;
                             }
                             if (allMessageIds.length > 0) {
                                 validatedArgs.references = allMessageIds.join(' ');

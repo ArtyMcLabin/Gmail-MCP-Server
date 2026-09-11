@@ -79,8 +79,79 @@ describe('Source verification', () => {
         const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
         expect(source).toContain('validatedArgs.threadId && !validatedArgs.inReplyTo');
         expect(source).toContain('gmail.users.threads.get');
-        expect(source).toContain('validatedArgs.inReplyTo = lastMessageId');
+        expect(source).toContain('validatedArgs.inReplyTo = newestMessageId');
         expect(source).toContain("validatedArgs.references = allMessageIds.join(' ')");
+    });
+
+    it('auto-resolve picks the reply parent by internalDate, not by array position', () => {
+        // Regression guard for ArtyMcLabin/PersonalAssistant-ClaudeCode#208: the
+        // reply parent used to be threadMessages[length - 1]. Gmail does not
+        // guarantee that array is chronological, and anchoring a draft to a
+        // non-newest parent makes it list in Drafts without ever rendering
+        // inside the conversation.
+        const source = fs.readFileSync(path.join(srcDir, 'index.ts'), 'utf-8');
+        expect(source).toContain('internalDate');
+        expect(source).not.toContain('threadMessages[threadMessages.length - 1]');
+    });
+});
+
+describe('Thread parent selection (#208)', () => {
+    // Mirrors the ordering logic in handleEmailAction's auto-resolve block.
+    const pickParentAndChain = (messages: any[]) => {
+        const ordered = messages
+            .map((msg, idx) => ({ msg, idx }))
+            .sort((a, b) => {
+                const da = Number(a.msg.internalDate ?? NaN);
+                const db = Number(b.msg.internalDate ?? NaN);
+                if (Number.isFinite(da) && Number.isFinite(db) && da !== db) {
+                    return da - db;
+                }
+                return a.idx - b.idx;
+            })
+            .map((entry) => entry.msg);
+        const idOf = (m: any) =>
+            (m?.payload?.headers || []).find(
+                (h: any) => h.name?.toLowerCase() === 'message-id'
+            )?.value;
+        return {
+            inReplyTo: idOf(ordered[ordered.length - 1]),
+            references: ordered.map(idOf).filter(Boolean).join(' '),
+        };
+    };
+
+    const msg = (id: string, internalDate?: string) => ({
+        internalDate,
+        payload: { headers: [{ name: 'Message-ID', value: id }] },
+    });
+
+    it('picks the NEWEST message when the array is out of order', () => {
+        const out = pickParentAndChain([
+            msg('<a@x>', '1000'),
+            msg('<c@x>', '3000'),
+            msg('<b@x>', '2000'),
+        ]);
+        expect(out.inReplyTo).toBe('<c@x>');
+        expect(out.references).toBe('<a@x> <b@x> <c@x>');
+    });
+
+    it('still picks the newest when the array is already chronological', () => {
+        const out = pickParentAndChain([
+            msg('<a@x>', '1000'),
+            msg('<b@x>', '2000'),
+        ]);
+        expect(out.inReplyTo).toBe('<b@x>');
+    });
+
+    it('falls back to array order when internalDate is missing', () => {
+        const out = pickParentAndChain([msg('<a@x>'), msg('<b@x>')]);
+        expect(out.inReplyTo).toBe('<b@x>');
+        expect(out.references).toBe('<a@x> <b@x>');
+    });
+
+    it('handles a single-message thread', () => {
+        const out = pickParentAndChain([msg('<only@x>', '500')]);
+        expect(out.inReplyTo).toBe('<only@x>');
+        expect(out.references).toBe('<only@x>');
     });
 
     it('read_email returns Message-ID', () => {
