@@ -22,6 +22,8 @@ import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { resolveToolPrefix } from "./tool-prefix.js";
+import { runDoctorCli } from "./auth-doctor.js";
+import { listenLoopback, isPrimaryBindMissing, portOwnerHint } from "./auth-listener.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -238,7 +240,6 @@ async function loadCredentials() {
 }
 
 async function authenticate(scopes: string[]) {
-    const server = http.createServer();
     // Port derivation:
     // - explicit port in the callback URL -> use it
     // - portless http -> protocol default 80 (NOT 3000 — that fallback caused
@@ -248,10 +249,69 @@ async function authenticate(scopes: string[]) {
     const port = callbackUrl.port
         ? Number(callbackUrl.port)
         : (callbackUrl.protocol === 'https:' ? 3000 : 80);
-    server.listen(port, '127.0.0.1');
 
     // Convert shorthand scope names (e.g., "gmail.readonly") to full Google API URLs
     const scopeUrls = scopeNamesToUrls(scopes);
+
+    // Executor form, not Promise.withResolvers: the package supports
+    // node >=14 and withResolvers landed in Node 22.
+    let callbackDone!: () => void;
+    let callbackFailed!: (error: Error) => void;
+    const callbackHandled = new Promise<void>((resolve, reject) => {
+        callbackDone = resolve;
+        callbackFailed = reject;
+    });
+    const onRequest: http.RequestListener = async (req, res) => {
+        if (!req.url?.startsWith(callbackUrl.pathname)) return;
+
+        const url = new URL(req.url, callbackUrl.origin);
+        const code = url.searchParams.get('code');
+
+        if (!code) {
+            res.writeHead(400);
+            res.end('No code provided');
+            callbackFailed(new Error('No code provided'));
+            return;
+        }
+
+        try {
+            const { tokens } = await oauth2Client.getToken(code);
+            oauth2Client.setCredentials(tokens);
+
+            // Store both tokens and authorized scopes for runtime filtering
+            const credentials = { tokens, scopes };
+            fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+
+            res.writeHead(200);
+            res.end('Authentication successful! You can close this window.');
+            console.log('Credentials written to:', CREDENTIALS_PATH);
+            console.log('Scopes granted:', scopes.join(', '));
+            console.log('Note: restart any running MCP clients — servers started before this re-auth keep the old refresh token in memory.');
+            callbackDone();
+        } catch (error) {
+            res.writeHead(500);
+            res.end('Authentication failed');
+            callbackFailed(error as Error);
+        }
+    };
+
+    // Bind every loopback stack the consent URL can land on. `localhost`
+    // resolves to IPv6 `::1` in most browsers, so a 127.0.0.1-only listener
+    // silently loses the callback whenever another process owns [::1]:port.
+    const listener = await listenLoopback(port, onRequest);
+    const fatalFailures = listener.failures.filter(({ host }) => host === '127.0.0.1');
+    if (isPrimaryBindMissing(listener)) {
+        const busy = fatalFailures.map(({ host, error }) => `${host}: ${error.code ?? error.message}`).join('; ');
+        console.error(`Error: cannot listen on 127.0.0.1:${port} (${busy}).`);
+        console.error(`Find and stop the process holding the port:  ${portOwnerHint(port)}`);
+        process.exit(1);
+    }
+    for (const { host, error } of listener.failures) {
+        console.error(`WARNING: could not bind ${host}:${port} (${error.code ?? error.message}).`);
+        console.error(`If the consent redirect goes to ${host}, another process will receive the OAuth code instead of this listener.`);
+        console.error(`Check:  ${portOwnerHint(port)}`);
+    }
+    console.log(`Listening for the OAuth callback on ${listener.bound.map((host) => `${host}:${port}`).join(' and ')}`);
 
     return new Promise<void>((resolve, reject) => {
         const authUrl = oauth2Client.generateAuthUrl({
@@ -264,43 +324,24 @@ async function authenticate(scopes: string[]) {
         console.log('Please visit this URL to authenticate:', authUrl);
         open(authUrl);
 
-        server.on('request', async (req, res) => {
-            if (!req.url?.startsWith(callbackUrl.pathname)) return;
-
-            const url = new URL(req.url, callbackUrl.origin);
-            const code = url.searchParams.get('code');
-
-            if (!code) {
-                res.writeHead(400);
-                res.end('No code provided');
-                reject(new Error('No code provided'));
-                return;
-            }
-
-            try {
-                const { tokens } = await oauth2Client.getToken(code);
-                oauth2Client.setCredentials(tokens);
-
-                // Store both tokens and authorized scopes for runtime filtering
-                const credentials = { tokens, scopes };
-                fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(credentials, null, 2), { mode: 0o600 });
-
-                res.writeHead(200);
-                res.end('Authentication successful! You can close this window.');
-                console.log('Credentials saved with scopes:', scopes.join(', '));
-                server.close();
+        callbackHandled
+            .then(async () => {
+                await listener.close();
                 resolve();
-            } catch (error) {
-                res.writeHead(500);
-                res.end('Authentication failed');
-                reject(error);
-            }
-        });
+            })
+            .catch(async (error: unknown) => {
+                await listener.close();
+                reject(error instanceof Error ? error : new Error(String(error)));
+            });
     });
 }
 
 // Main function
 async function main() {
+    if (process.argv[2] === 'doctor') {
+        process.exit(await runDoctorCli(process.env));
+    }
+
     await loadCredentials();
 
     if (process.argv[2] === 'auth') {
