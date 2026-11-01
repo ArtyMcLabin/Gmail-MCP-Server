@@ -27,6 +27,8 @@ MISMATCH handling: don't build it, don't merge it. **Pitch the item to the maint
 2. PR merges and own changes go into `experimental` first. Never merge PRs directly into `main`.
 3. After a batch is complete on `experimental`: wait for user confirmation, then merge `experimental` → `main`.
 4. **After every push to any branch:** run `gh run list --branch {branch} --limit 1` and verify CI passes. If CI fails, fix immediately - do NOT leave broken CI for the user to discover. This applies to every `git push` in the session, not just merges.
+   - **Also at the START of every review/triage session:** `gh run list --branch experimental --workflow ci.yml --limit 1`. Red = fix before anything else (incident 2026-11-01: experimental CI had been red since 2026-10-07 on `npm audit --audit-level=critical` and nobody saw it for 3.5 weeks, which blocked the promotion mid-flight).
+   - **Lockfile refresh when local npm crashes** (`Cannot read properties of null (reading 'edgesOut')` = npm 10.x arborist bug): regenerate with `npx -y npm@11 install`, then verify with the local `npm ci` + `npm audit --audit-level=critical` + `npm run lockfile:lint` before committing.
 5. **End of each dev round (batch merged to `experimental`, awaiting soak):** create a task in the user's Personal CRM (`mcp__claude_ai_Personal_CRM__crm_create_task`, load via ToolSearch) titled "Promote Gmail-MCP experimental→main if soak clean", due ~1 week out (or whatever fits the round's size). The user tracks promotions there, not in GitHub. (Arty directive 2026-07-11.)
 
 ## npm & MCP Registry Releases
@@ -35,6 +37,7 @@ Published as **@artymclabin/gmail-mcp** on npm + **io.github.ArtyMcLabin/Gmail-M
 
 - **Tags are cut from `main` ONLY.** Pushing a `v*` tag triggers `.github/workflows/publish.yml` -> npm publish. Never tag `experimental` (incident 2026-07-11: v1.2.0/v1.2.1 tagged off experimental put unsoaked staging code on npm as `latest`; resolved by same-day promotion).
 - **Release procedure (at promotion):** merge `experimental`->`main` -> bump version in package.json + package-lock.json + server.json (both `version` fields) -> commit on main -> `git tag vX.Y.Z && git push origin vX.Y.Z` -> verify the "Publish release" workflow is green. The tag push publishes EVERYWHERE automatically: npm -> official MCP Registry (OIDC, no interactive login) -> Smithery (.mcpb bundle built in CI from `mcpb-manifest.json`, version-synced via jq). No manual `mcp-publisher` or `smithery` steps needed. First automated exercise: next release after 2026-07-11 - watch it end-to-end once.
+- **npm publishes via OIDC trusted publishing (no NPM_TOKEN).** It only works if npmjs.com has a trusted publisher entry for this package exactly matching GitHub Actions / `ArtyMcLabin` / `Gmail-MCP-Server` / `publish.yml` / no environment. A missing or mismatched entry fails as a misleading `404 Not Found - PUT .../@artymclabin%2fgmail-mcp`. Never change publish auth in the workflow without verifying the npm-side setting in the same session (incident 2026-11-01: the workflow was switched to OIDC on 2026-08-12 claiming npm trusted it; it did not, and v1.2.4 failed to publish). The setting lives on https://www.npmjs.com/package/@artymclabin/gmail-mcp/access and sign-in needs the maintainer's security key - PA drives the browser, the maintainer only taps the key. After a failed publish: fix, then `gh run rerun <run-id> --failed`.
 - `mcpName` in package.json must always equal `name` in server.json (registry ownership validation).
 - **NPM_TOKEN secret** rotation is tracked in the maintainer's PRIVATE task tracker (Personal CRM) - 🚨 NEVER document token/auth posture details (expiry dates, 2FA state, token types) in this public repo, including GitHub issues (incident 2026-07-11: such an issue was created and had to be deleted - supply-chain recon risk).
 
@@ -95,6 +98,7 @@ After merging a PR that adds new tools or features, rebuild from source (`npm ru
 ## Staleness Policy
 
 - PRs with "help wanted" label: keep open for up to **8 months from creation** (Arty directive 2026-07-10, supersedes the earlier 6-month rule). Close as stale if no community participation by then.
+- **Track stale-close deadlines as a Personal CRM task, never a self-deleting cron workflow.** The repo `GITHUB_TOKEN` cannot modify `.github/workflows/`, so a workflow that tries to delete itself fails silently and runs forever (the #19 closer ran daily for months after #19 closed; removed 2026-11-01).
 - Stale PRs without label: assess on a case-by-case basis.
 
 ## Issue Review (Same Rules Apply)
