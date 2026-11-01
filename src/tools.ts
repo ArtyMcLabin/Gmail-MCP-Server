@@ -465,7 +465,9 @@ export function toMcpTools(tools: ToolDefinition[]) {
   return tools.map(tool => ({
     name: tool.name,
     description: tool.description,
-    inputSchema: zodToJsonSchema(tool.schema),
+    // zod-to-json-schema >=3.25 types its param from "zod/v3"; comparing that to
+    // our "zod" ZodType recurses until tsc gives up (TS2589). Same runtime class.
+    inputSchema: zodToJsonSchema(tool.schema as unknown as Parameters<typeof zodToJsonSchema>[0]),
     annotations: tool.annotations,
   }));
 }
