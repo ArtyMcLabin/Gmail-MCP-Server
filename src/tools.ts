@@ -218,6 +218,18 @@ export const ReplyAllSchema = z.object({
   inlineImages: z.array(InlineImageSchema).optional().describe("Images embedded inline in the HTML body, each referenced from htmlBody as <img src=\"cid:CID\">. Requires htmlBody to be set."),
 });
 
+// Forward schema - fetches the original email and re-sends it to new recipients
+export const ForwardEmailSchema = z.object({
+  messageId: z.string().describe("ID of the email message to forward"),
+  to: z.array(z.string()).describe("List of recipient email addresses to forward to"),
+  cc: z.array(z.string()).optional().describe("List of CC recipients"),
+  bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
+  from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
+  body: z.string().optional().describe("Optional note placed above the quoted original message"),
+  htmlBody: z.string().optional().describe("HTML version of the optional note. Only used when the original message has an HTML body."),
+  includeAttachments: z.boolean().optional().default(true).describe("Carry the original message's attachments and inline images over to the forwarded copy"),
+});
+
 // Tool definition type
 export interface ToolAnnotations {
   title: string;
@@ -457,6 +469,15 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: ReplyAllSchema,
     scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
     annotations: { title: "Reply All", destructiveHint: false },
+  },
+
+  // Forward operation
+  {
+    name: "forward_email",
+    description: "Forwards an existing email to new recipients. Fetches the original message, prepends the standard 'Forwarded message' header block, and carries attachments and inline images over by default.",
+    schema: ForwardEmailSchema,
+    scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
+    annotations: { title: "Forward Email", destructiveHint: false },
   },
 ];
 
