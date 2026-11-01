@@ -126,6 +126,20 @@ describe('runDoctorChecks', () => {
         expect(report.scopes).toEqual(['gmail.readonly', 'gmail.compose']);
     });
 
+    it('accepts the legacy flat credentials shape the server itself still loads', async () => {
+        const dir = makeTempDir();
+        const credentialsPath = path.join(dir, 'credentials.json');
+        writeJson(credentialsPath, { access_token: 'a', refresh_token: 'r', scope: 'gmail.modify' });
+        writeJson(path.join(dir, 'keys.json'), OK_KEYS);
+        const report = await runDoctorChecks({
+            credentialsPath,
+            keysPath: path.join(dir, 'keys.json'),
+            fetchImpl: stubFetch(200, { access_token: 'a2', expires_in: 3599 }),
+        });
+        expect(report.verdict).toBe('healthy');
+        expect(report.scopes).toEqual(['gmail.modify']);
+    });
+
     it('reports unusable when Google rejects the refresh token', async () => {
         const dir = makeTempDir();
         const credentialsPath = path.join(dir, 'credentials.json');

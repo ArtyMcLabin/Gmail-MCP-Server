@@ -12,6 +12,8 @@
  * cron checks.
  */
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 export type DoctorVerdict = 'healthy' | 'unusable';
 
@@ -30,13 +32,16 @@ export interface DoctorReport {
     expiresInSeconds?: number;
 }
 
-interface StoredCredentials {
-    tokens?: {
-        access_token?: string;
-        refresh_token?: string;
-        expiry_date?: number;
-        scope?: string;
-    };
+interface StoredTokens {
+    access_token?: string;
+    refresh_token?: string;
+    expiry_date?: number;
+    scope?: string;
+}
+
+// Same two shapes index.ts loads: { tokens, scopes } or the legacy flat token object.
+interface StoredCredentials extends StoredTokens {
+    tokens?: StoredTokens;
     scopes?: string[];
 }
 
@@ -116,7 +121,7 @@ export async function runDoctorChecks(env: DoctorEnv): Promise<DoctorReport> {
     }
 
     const credentials = readJson<StoredCredentials>(env.credentialsPath);
-    const tokens = credentials?.tokens;
+    const tokens = credentials?.tokens ?? credentials;
     if (!tokens?.refresh_token) {
         report.error = 'missing_refresh_token';
         report.errorDescription = 'The file has no refresh token — run `auth` to obtain one.';
@@ -153,9 +158,10 @@ export async function runDoctorChecks(env: DoctorEnv): Promise<DoctorReport> {
  * exit code (0 healthy, 1 anything else).
  */
 export async function runDoctorCli(env: NodeJS.ProcessEnv): Promise<number> {
-    const configDir = env.GMAIL_CONFIG_DIR ?? `${process.env.HOME ?? '~'}/.gmail-mcp`;
-    const credentialsPath = env.GMAIL_CREDENTIALS_PATH ?? `${configDir}/credentials.json`;
-    const keysPath = env.GMAIL_OAUTH_PATH ?? `${configDir}/gcp-oauth.keys.json`;
+    // Same defaults as index.ts (os.homedir works on Windows, where HOME is often unset).
+    const configDir = path.join(os.homedir(), '.gmail-mcp');
+    const credentialsPath = env.GMAIL_CREDENTIALS_PATH ?? path.join(configDir, 'credentials.json');
+    const keysPath = env.GMAIL_OAUTH_PATH ?? path.join(configDir, 'gcp-oauth.keys.json');
 
     const report = await runDoctorChecks({ credentialsPath, keysPath, fetchImpl: fetch });
 
