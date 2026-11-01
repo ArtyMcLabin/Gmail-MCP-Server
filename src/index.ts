@@ -20,7 +20,7 @@ import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, Gm
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { addFwdPrefix, collectForwardAttachments, assertForwardAttachmentsWithinLimit, buildForwardedTextBody, buildForwardedHtmlBody } from "./forward-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema, ForwardEmailSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema, ForwardEmailSchema, ListDraftsSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { resolveToolPrefix } from "./tool-prefix.js";
 import { runDoctorCli } from "./auth-doctor.js";
@@ -946,6 +946,53 @@ async function main() {
                             {
                                 type: "text",
                                 text: `Draft ${validatedArgs.draftId} deleted successfully.`,
+                            },
+                        ],
+                    };
+                }
+
+                case "list_drafts": {
+                    const validatedArgs = ListDraftsSchema.parse(args);
+                    const draftsResponse = await gmail.users.drafts.list({
+                        userId: 'me',
+                        maxResults: validatedArgs.maxResults || 50,
+                        q: validatedArgs.query,
+                    });
+
+                    const drafts = draftsResponse.data.drafts || [];
+
+                    // drafts.list only returns draft id + message {id, threadId}; fetch
+                    // metadata per draft so each entry is identifiable by subject/To/snippet.
+                    const draftDetails = await Promise.all(
+                        drafts.map(async (draft) => {
+                            const detail = await gmail.users.drafts.get({
+                                userId: 'me',
+                                id: draft.id!,
+                                format: 'metadata',
+                            });
+
+                            const message = detail.data.message;
+                            const headers = message?.payload?.headers || [];
+
+                            return {
+                                draftId: draft.id || '',
+                                messageId: message?.id || '',
+                                threadId: message?.threadId || '',
+                                subject: headers.find(h => h.name === 'Subject')?.value || '',
+                                to: headers.find(h => h.name === 'To')?.value || '',
+                                snippet: message?.snippet || '',
+                            };
+                        })
+                    );
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({
+                                    resultCount: draftDetails.length,
+                                    drafts: draftDetails,
+                                }, null, 2),
                             },
                         ],
                     };

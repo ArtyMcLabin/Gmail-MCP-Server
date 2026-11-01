@@ -65,6 +65,11 @@ export const DeleteDraftSchema = z.object({
   draftId: z.string().describe("ID of the draft to delete"),
 });
 
+export const ListDraftsSchema = z.object({
+  maxResults: z.number().int().min(1).max(100).optional().default(50).describe("Maximum number of drafts to return (1-100, default: 50)"),
+  query: z.string().optional().describe("Gmail search query to filter drafts (e.g., 'subject:invoice'). Omit to list all drafts."),
+});
+
 export const UpdateDraftSchema = z.object({
   draftId: z.string().describe("ID of the draft to update"),
   to: z.array(z.string()).describe("List of recipient email addresses"),
@@ -344,6 +349,13 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: UpdateDraftSchema,
     scopes: ["gmail.modify", "gmail.compose"],
     annotations: { title: "Update Draft", destructiveHint: false },
+  },
+  {
+    name: "list_drafts",
+    description: "Lists existing drafts, returning each draft's draft ID plus the subject, To and snippet of its message. Use this to find the draftId required by send_draft, delete_draft and update_draft for drafts that were not created in the current session.",
+    schema: ListDraftsSchema,
+    scopes: ["gmail.readonly", "gmail.modify", "gmail.compose"],
+    annotations: { title: "List Drafts", readOnlyHint: true },
   },
   {
     name: "modify_email",

@@ -33,7 +33,7 @@ There's a downstream fork that took this in the **maximalist** direction. I'm no
 - **Thread-level tools** - `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`, `modify_thread` for efficient thread-based email operations in a single call
 - **CC/BCC visibility** - `read_email` now shows CC and BCC headers when present ([PR #21](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/21) by [@panghy](https://github.com/panghy))
 - **Phishing report tools** - `report_phishing` and `batch_report_phishing` for marking messages as spam via the Gmail API ([PR #24](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/24) by [@ShivamB25](https://github.com/ShivamB25))
-- **Draft lifecycle tools** - `send_draft`, `delete_draft`, `update_draft` close the orphan-draft gap: `send_draft` atomically sends an existing draft and removes it from Drafts (no ghost copy); `update_draft` mutates a draft in place preserving its ID (no draft pile-up across iteration loops); `delete_draft` discards an abandoned draft ([PR #30](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/30) by [@thisisambros](https://github.com/thisisambros))
+- **Draft lifecycle tools** - `list_drafts`, `send_draft`, `delete_draft`, `update_draft` close the orphan-draft gap: `list_drafts` discovers existing drafts and their IDs (needed by the other draft tools for drafts not created in the current session); `send_draft` atomically sends an existing draft and removes it from Drafts (no ghost copy); `update_draft` mutates a draft in place preserving its ID (no draft pile-up across iteration loops); `delete_draft` discards an abandoned draft ([PR #30](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/30) by [@thisisambros](https://github.com/thisisambros))
 - **Tool annotations** - MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** - `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
 - **Durable OAuth sessions** - `refresh_token` is persisted across restarts, ending the hourly re-auth loop ([PR #35](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/35) by [@BrentBaccala](https://github.com/BrentBaccala))
@@ -286,6 +286,7 @@ The server automatically filters available tools based on your authorized scopes
 |-------|---------------------|
 | `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
+| `list_drafts` | `gmail.readonly`, `gmail.modify`, or `gmail.compose` |
 | `send_email`, `draft_email`, `reply_all`, `forward_email`, `send_draft` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
 | `delete_draft`, `update_draft` | `gmail.modify` or `gmail.compose` |
 | `modify_email`, `batch_modify_emails`, `modify_thread`, `report_phishing`, `batch_report_phishing` | `gmail.modify` |
@@ -774,9 +775,20 @@ Discards an abandoned draft via `users.drafts.delete`.
 }
 ```
 
+### 27. List Drafts (`list_drafts`)
+Lists existing drafts via `users.drafts.list` and returns each draft's `draftId` alongside its `messageId`, `threadId`, `subject`, `to` and `snippet`. Because `drafts.list` returns only draft/message IDs, each draft is fetched with `users.drafts.get` (`format: 'metadata'`) to populate those fields. This is how you obtain the `draftId` required by `send_draft`, `update_draft` and `delete_draft` for drafts that were **not** created in the current session (e.g. drafts written in the Gmail UI or a previous run). Accepts an optional `maxResults` (default 50) and an optional Gmail `query` to filter drafts.
+
+```json
+{
+  "maxResults": 20,
+  "query": "subject:invoice"
+}
+```
+
 #### Canonical draft lifecycle
 
 ```
+list_drafts()                  // discover draftIds not created this session
 draft_email(...) → draftId
   ↓ (user wants changes)
 update_draft(draftId, ...)   // mutate in place, same ID
@@ -786,7 +798,7 @@ send_draft(draftId)          // atomic send + draft removal
 
 Or abort: `delete_draft(draftId)`.
 
-### 27. Forward Email (`forward_email`)
+### 28. Forward Email (`forward_email`)
 Forwards an existing email to new recipients. Fetches the original message, prepends the standard `---------- Forwarded message ----------` header block, and carries attachments and inline images over by default.
 
 **How it works:**
