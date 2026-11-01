@@ -70,9 +70,11 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           mkdir bundle
-          cp -r dist package.json README.md LICENSE bundle/
+          cp -r dist package.json package-lock.json README.md LICENSE bundle/
           jq --arg v "$VERSION" '.version = $v' mcpb-manifest.json > bundle/manifest.json
-          cd bundle && npm install --omit=dev --ignore-scripts
+          # npm ci from the lockfile: deterministic, and avoids the npm 10 resolver crash
+          # ("Cannot read properties of null (reading 'edgesOut')") a lockless install hits.
+          cd bundle && npm ci --omit=dev --ignore-scripts
       - name: Pack bundle
         run: |
           npx --yes @anthropic-ai/mcpb validate bundle/manifest.json
