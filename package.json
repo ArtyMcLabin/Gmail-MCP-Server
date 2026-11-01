@@ -1,6 +1,6 @@
 {
   "name": "@artymclabin/gmail-mcp",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "mcpName": "io.github.ArtyMcLabin/Gmail-MCP-Server",
   "description": "Lean Gmail MCP server with auto authentication support (maintained fork of GongRzhe/Gmail-MCP-Server)",
   "type": "module",

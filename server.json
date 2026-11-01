@@ -6,12 +6,12 @@
     "url": "https://github.com/ArtyMcLabin/Gmail-MCP-Server",
     "source": "github"
   },
-  "version": "1.2.3",
+  "version": "1.2.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@artymclabin/gmail-mcp",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "transport": {
         "type": "stdio"
       },
