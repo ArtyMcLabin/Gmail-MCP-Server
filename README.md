@@ -374,6 +374,23 @@ Tools then surface as `mcp__gmail-personal__personal_search_emails`, `mcp__gmail
 
 The `auth` subcommand runs before the server starts and is unaffected - invoke it without `--tool-prefix`.
 
+### Checking token health: the `doctor` subcommand
+
+`doctor` diagnoses the stored OAuth tokens without starting the server or opening a browser. It verifies the credentials and keys files exist, that a refresh token is stored, and exchanges the refresh grant with Google to confirm the account is still authorized. Exit code `0` means healthy, `1` means the account needs a browser re-consent (scriptable for cron checks):
+
+```bash
+npx @artymclabin/gmail-mcp doctor
+
+# per-account, matching how the server was configured
+GMAIL_CREDENTIALS_PATH=$HOME/.gmail-mcp/credentials-personal.json \
+GMAIL_OAUTH_PATH=$HOME/.gmail-mcp/gcp-oauth.keys.json \
+npx @artymclabin/gmail-mcp doctor
+```
+
+Why a refresh token can die even though the server never restarted: unverified OAuth apps get seven-day refresh tokens, and password changes or manual revocations kill them sooner. When `doctor` reports `invalid_grant`, re-run `auth` to re-consent, then **restart the MCP clients** - servers started before the re-auth keep the old refresh token in memory and keep failing until respawned.
+
+The `auth` callback also listens on every loopback stack (`127.0.0.1` and `::1`). Browsers resolve `localhost` to `::1` first, so a `127.0.0.1`-only listener silently loses the consent redirect to whichever process owns `[::1]:3000`; `auth` now warns loudly when a stack is busy and names the `lsof` command to find the blocker.
+
 ## Available Tools
 
 The server provides the following tools that can be used through Claude Desktop:
