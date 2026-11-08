@@ -23,6 +23,7 @@ import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema, ForwardEmailSchema, ListDraftsSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { resolveToolPrefix } from "./tool-prefix.js";
+import { resolveAttachmentFilename } from "./attachment-filename.js";
 import { runDoctorCli } from "./auth-doctor.js";
 import { listenLoopback, isPrimaryBindMissing, portOwnerHint } from "./auth-listener.js";
 
@@ -1477,21 +1478,10 @@ async function main() {
                                 format: 'full',
                             });
 
-                            // Find the attachment part to get original filename
-                            const findAttachment = (part: any): string | null => {
-                                if (part.body && part.body.attachmentId === validatedArgs.attachmentId) {
-                                    return part.filename || fallbackAttachmentName(validatedArgs.attachmentId);
-                                }
-                                if (part.parts) {
-                                    for (const subpart of part.parts) {
-                                        const found = findAttachment(subpart);
-                                        if (found) return found;
-                                    }
-                                }
-                                return null;
-                            };
-
-                            filename = findAttachment(messageResponse.data.payload) || fallbackAttachmentName(validatedArgs.attachmentId);
+                            // The re-fetched attachmentId may differ from the one passed in, so
+                            // resolve by id, then by size, then sole attachment (see attachment-filename.ts).
+                            filename = resolveAttachmentFilename(messageResponse.data.payload, validatedArgs.attachmentId, buffer.length)
+                                || fallbackAttachmentName(validatedArgs.attachmentId);
                         }
 
                         // Sanitize filename to prevent path traversal
