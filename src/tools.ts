@@ -3,6 +3,21 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 
 // Schema definitions
 
+// `from` and `to` descriptions, shared by send_email, draft_email, update_draft
+// and forward_email. They differ on purpose: a bare `from` address is sent with
+// no display name (Gmail does not fill in the alias's name), while `to` goes
+// through validateEmail(), which rejects anything containing whitespace.
+const FROM_DESCRIPTION =
+  "Sender, as `email` or `Display Name <email>` (e.g. `Jane Doe <jane@example.com>`). " +
+  "Quote the name if it contains a comma or period: `\"Doe, Jane\" <jane@example.com>`. " +
+  "The address must be a configured send-as alias in Gmail settings. " +
+  "A bare address is sent with no display name, so pass the name to show one. " +
+  "Defaults to the account's default send-as address.";
+
+const TO_DESCRIPTION =
+  "Recipient email addresses, bare only (e.g. `jane@example.com`). " +
+  "Unlike `from`, `Display Name <email>` is rejected here.";
+
 // Inline image embedded in an HTML body and referenced via a cid: URL.
 // Exactly one of `path` / `content` must be set; `contentType` is required with `content`.
 export const InlineImageSchema = z.object({
@@ -22,10 +37,10 @@ export const InlineImageSchema = z.object({
   });
 
 export const SendEmailSchema = z.object({
-  to: z.array(z.string()).describe("List of recipient email addresses"),
+  to: z.array(z.string()).describe(TO_DESCRIPTION),
   subject: z.string().describe("Email subject"),
   body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
-  from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
+  from: z.string().optional().describe(FROM_DESCRIPTION),
   htmlBody: z.string().optional().describe("HTML version of the email body"),
   mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
   cc: z.array(z.string()).optional().describe("List of CC recipients"),
@@ -72,10 +87,10 @@ export const ListDraftsSchema = z.object({
 
 export const UpdateDraftSchema = z.object({
   draftId: z.string().describe("ID of the draft to update"),
-  to: z.array(z.string()).describe("List of recipient email addresses"),
+  to: z.array(z.string()).describe(TO_DESCRIPTION),
   subject: z.string().describe("Email subject"),
   body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
-  from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
+  from: z.string().optional().describe(FROM_DESCRIPTION),
   htmlBody: z.string().optional().describe("HTML version of the email body"),
   mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
   cc: z.array(z.string()).optional().describe("List of CC recipients"),
@@ -226,10 +241,10 @@ export const ReplyAllSchema = z.object({
 // Forward schema - fetches the original email and re-sends it to new recipients
 export const ForwardEmailSchema = z.object({
   messageId: z.string().describe("ID of the email message to forward"),
-  to: z.array(z.string()).describe("List of recipient email addresses to forward to"),
+  to: z.array(z.string()).describe(TO_DESCRIPTION),
   cc: z.array(z.string()).optional().describe("List of CC recipients"),
   bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
-  from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
+  from: z.string().optional().describe(FROM_DESCRIPTION),
   body: z.string().optional().describe("Optional note placed above the quoted original message"),
   htmlBody: z.string().optional().describe("HTML version of the optional note. Only used when the original message has an HTML body."),
   includeAttachments: z.boolean().optional().default(true).describe("Carry the original message's attachments and inline images over to the forwarded copy"),
