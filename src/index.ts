@@ -25,6 +25,7 @@ import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./
 import { resolveToolPrefix } from "./tool-prefix.js";
 import { runDoctorCli } from "./auth-doctor.js";
 import { listenLoopback, isPrimaryBindMissing, portOwnerHint } from "./auth-listener.js";
+import { ReloadingOAuth2Client } from "./credential-reload.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -210,10 +211,13 @@ async function loadCredentials() {
             console.log('https callback URL detected: assuming a reverse proxy terminates TLS and forwards to the local listener on port 3000 (see README "Cloud Server Authentication").');
         }
 
-        oauth2Client = new OAuth2Client(
+        // Reloads the credentials file when Google rejects the in-memory refresh
+        // token, so a re-auth reaches servers that were already running.
+        oauth2Client = new ReloadingOAuth2Client(
             keys.client_id,
             keys.client_secret,
-            callback
+            callback,
+            CREDENTIALS_PATH
         );
 
         if (fs.existsSync(CREDENTIALS_PATH)) {
@@ -306,7 +310,7 @@ async function authenticate(scopes: string[]) {
             res.end('Authentication successful! You can close this window.');
             console.log('Credentials written to:', CREDENTIALS_PATH);
             console.log('Scopes granted:', scopes.join(', '));
-            console.log('Note: restart any running MCP clients — servers started before this re-auth keep the old refresh token in memory.');
+            console.log('Note: running servers switch to this token once Google rejects their old one. Restart the MCP clients only if you changed scopes, or if a server started before any credentials existed.');
             callbackDone();
         } catch (error) {
             res.writeHead(500);
