@@ -388,7 +388,7 @@ GMAIL_OAUTH_PATH=$HOME/.gmail-mcp/gcp-oauth.keys.json \
 npx @artymclabin/gmail-mcp doctor
 ```
 
-Why a refresh token can die even though the server never restarted: unverified OAuth apps get seven-day refresh tokens, and password changes or manual revocations kill them sooner. When `doctor` reports `invalid_grant`, re-run `auth` to re-consent, then **restart the MCP clients** - servers started before the re-auth keep the old refresh token in memory and keep failing until respawned.
+Why a refresh token can die even though the server never restarted: unverified OAuth apps get seven-day refresh tokens, and password changes or manual revocations kill them sooner. When `doctor` reports `invalid_grant`, re-run `auth` to re-consent. You don't need to restart the MCP clients: when Google rejects the refresh token a running server holds, the server reads the new one from the credentials file and retries. A server that is already failing with `invalid_grant` recovers on its next tool call; after a manual revocation, a server can keep failing until its cached access token expires (up to an hour). Restart the clients only if the re-auth changed `--scopes`, because a running server keeps the tool list it built from the scopes it read at startup.
 
 The `auth` callback also listens on every loopback stack (`127.0.0.1` and `::1`). Browsers resolve `localhost` to `::1` first, so a `127.0.0.1`-only listener silently loses the consent redirect to whichever process owns `[::1]:3000`; `auth` now warns loudly when a stack is busy and names the `lsof` command to find the blocker.
 

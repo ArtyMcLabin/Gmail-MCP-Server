@@ -174,6 +174,7 @@ export async function runDoctorCli(env: NodeJS.ProcessEnv): Promise<number> {
     }
     console.log(`Verdict:     needs re-auth (${report.error}) — ${report.errorDescription ?? ''}`.trimEnd());
     console.log('Fix: run `gmail-mcp auth --scopes=<your scopes>` with this account\'s');
-    console.log('GMAIL_OAUTH_PATH / GMAIL_CREDENTIALS_PATH env vars, then restart the MCP clients.');
+    console.log('GMAIL_OAUTH_PATH / GMAIL_CREDENTIALS_PATH env vars. Running servers switch to the new token on their own;');
+    console.log('restart the MCP clients only if you changed scopes, or if a server started before any credentials existed.');
     return 1;
 }
