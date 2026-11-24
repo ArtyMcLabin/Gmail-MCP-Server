@@ -77,6 +77,8 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 
 ## Installation & Authentication
 
+Requires Node.js 20 or later.
+
 ### Installing from npm (recommended)
 
 ```bash

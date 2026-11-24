@@ -70,6 +70,15 @@ describe('createEmailWithNodemailer — inline images', () => {
         expect(raw).toMatch(/text\/plain/i);
     });
 
+    it('keeps CRLF structural line endings (headers, boundaries, base64 parts), as with nodemailer 7.x', async () => {
+        const raw = await createEmailWithNodemailer({
+            ...baseArgs,
+            inlineImages: [{ cid: 'logo1', path: imgPath }],
+        });
+        expect(raw).toContain('\r\n');
+        expect(raw).not.toMatch(/[^\r]\n/);
+    });
+
     it('embeds a regular attachment alongside an inline image (multipart/mixed)', async () => {
         const raw = await createEmailWithNodemailer({
             ...baseArgs,

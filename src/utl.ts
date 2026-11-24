@@ -132,7 +132,6 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
     // Create a nodemailer transporter (we won't actually send, just generate the message)
     const transporter = nodemailer.createTransport({
         streamTransport: true,
-        newline: 'unix',
         buffer: true
     });
 
