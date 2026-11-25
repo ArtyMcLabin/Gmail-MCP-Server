@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { EMAIL_MIME_TYPES } from './email-format.js';
+
+// Leave omitted values undefined so builders can distinguish a configured
+// default from an explicit per-call choice (notably HTML in body).
+const EmailMimeTypeSchema = z.enum(EMAIL_MIME_TYPES).optional().describe(
+  'Email content type; overrides GMAIL_DEFAULT_MIME_TYPE (text/plain when unset). With a configured HTML default, body is escaped text; use htmlBody for markup.',
+);
 
 // Schema definitions
 
@@ -27,7 +34,7 @@ export const SendEmailSchema = z.object({
   body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
   from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
   htmlBody: z.string().optional().describe("HTML version of the email body"),
-  mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
+  mimeType: EmailMimeTypeSchema,
   cc: z.array(z.string()).optional().describe("List of CC recipients"),
   bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
   threadId: z.string().optional().describe("Thread ID to reply to"),
@@ -77,7 +84,7 @@ export const UpdateDraftSchema = z.object({
   body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
   from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
   htmlBody: z.string().optional().describe("HTML version of the email body"),
-  mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
+  mimeType: EmailMimeTypeSchema,
   cc: z.array(z.string()).optional().describe("List of CC recipients"),
   bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
   threadId: z.string().optional().describe("Thread ID to reply to"),
@@ -218,7 +225,7 @@ export const ReplyAllSchema = z.object({
   messageId: z.string().describe("ID of the email message to reply to"),
   body: z.string().describe("Reply body content (used for text/plain or when htmlBody not provided)"),
   htmlBody: z.string().optional().describe("HTML version of the reply body"),
-  mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
+  mimeType: EmailMimeTypeSchema,
   attachments: z.array(z.string()).optional().describe("List of file paths to attach to the reply"),
   inlineImages: z.array(InlineImageSchema).optional().describe("Images embedded inline in the HTML body, each referenced from htmlBody as <img src=\"cid:CID\">. Requires htmlBody to be set."),
 });

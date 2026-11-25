@@ -392,6 +392,25 @@ Why a refresh token can die even though the server never restarted: unverified O
 
 The `auth` callback also listens on every loopback stack (`127.0.0.1` and `::1`). Browsers resolve `localhost` to `::1` first, so a `127.0.0.1`-only listener silently loses the consent redirect to whichever process owns `[::1]:3000`; `auth` now warns loudly when a stack is busy and names the `lsof` command to find the blocker.
 
+## Default email format
+
+Set `GMAIL_DEFAULT_MIME_TYPE` in the MCP server's environment to choose the default for `send_email`, `draft_email`, `update_draft`, and `reply_all`:
+
+```json
+{
+  "env": {
+    "GMAIL_DEFAULT_MIME_TYPE": "multipart/alternative"
+  }
+}
+```
+
+Accepted values are `text/plain` (the default when unset), `text/html`, and `multipart/alternative` (HTML with a plain-text fallback). Restart the server after changing its environment. Invalid values are rejected when composing a message.
+
+- A per-call `mimeType` overrides the server default, including explicit `text/plain`.
+- Under an HTML or multipart default, ordinary `body` text is HTML-escaped and line breaks are preserved. Use `htmlBody` for formatted markup. Explicit `mimeType: "text/html"` continues to accept markup in `body`.
+- Supplying `htmlBody` without `mimeType` produces a multipart message under the plain-text default, so the HTML is retained.
+- The setting applies equally to messages with attachments. Forwarding preserves the original message's format. Sending an existing saved draft does not reformat it; update the draft first if needed.
+
 ## Available Tools
 
 The server provides the following tools that can be used through Claude Desktop:
@@ -708,7 +727,7 @@ Parameters:
 - `messageId` (required): ID of the email to reply to
 - `body` (required): Reply body (plain text, or fallback when using multipart)
 - `htmlBody` (optional): HTML version of the reply body
-- `mimeType` (optional): `text/plain` (default), `text/html`, or `multipart/alternative`
+- `mimeType` (optional): `text/plain`, `text/html`, or `multipart/alternative`; defaults to `GMAIL_DEFAULT_MIME_TYPE` (`text/plain` when unset)
 - `attachments` (optional): Array of file paths to attach
 
 ### 21. Modify Thread (`modify_thread`)

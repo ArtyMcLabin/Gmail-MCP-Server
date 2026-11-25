@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { lookup as mimeLookup } from 'mime-types';
 import nodemailer from 'nodemailer';
+import { resolveEmailBody } from './email-format.js';
 
 /**
  * Upper bound on the decoded size of a base64 `content` inline image. Rejecting
@@ -38,14 +39,7 @@ function sanitizeHeaderValue(value: string): string {
 
 export function createEmailMessage(validatedArgs: any): string {
     const encodedSubject = encodeEmailHeader(sanitizeHeaderValue(validatedArgs.subject));
-    // Determine content type based on available content and explicit mimeType
-    let mimeType = validatedArgs.mimeType || 'text/plain';
-    
-    // If htmlBody is provided and mimeType isn't explicitly set to text/plain,
-    // use multipart/alternative to include both versions
-    if (validatedArgs.htmlBody && mimeType !== 'text/plain') {
-        mimeType = 'multipart/alternative';
-    }
+    const { mimeType, text, html } = resolveEmailBody(validatedArgs);
 
     // Generate a random boundary string for multipart messages
     const boundary = `----=_NextPart_${Math.random().toString(36).substring(2)}`;
@@ -90,7 +84,7 @@ export function createEmailMessage(validatedArgs: any): string {
         emailParts.push('Content-Type: text/plain; charset=UTF-8');
         emailParts.push('Content-Transfer-Encoding: 7bit');
         emailParts.push('');
-        emailParts.push(validatedArgs.body);
+        emailParts.push(text!);
         emailParts.push('');
         
         // HTML part
@@ -98,7 +92,7 @@ export function createEmailMessage(validatedArgs: any): string {
         emailParts.push('Content-Type: text/html; charset=UTF-8');
         emailParts.push('Content-Transfer-Encoding: 7bit');
         emailParts.push('');
-        emailParts.push(validatedArgs.htmlBody || validatedArgs.body); // Use body as fallback
+        emailParts.push(html!);
         emailParts.push('');
         
         // Close the boundary
@@ -108,13 +102,13 @@ export function createEmailMessage(validatedArgs: any): string {
         emailParts.push('Content-Type: text/html; charset=UTF-8');
         emailParts.push('Content-Transfer-Encoding: 7bit');
         emailParts.push('');
-        emailParts.push(validatedArgs.htmlBody || validatedArgs.body);
+        emailParts.push(html!);
     } else {
         // Plain text email (default)
         emailParts.push('Content-Type: text/plain; charset=UTF-8');
         emailParts.push('Content-Transfer-Encoding: 7bit');
         emailParts.push('');
-        emailParts.push(validatedArgs.body);
+        emailParts.push(text!);
     }
 
     return emailParts.join('\r\n');
@@ -122,6 +116,7 @@ export function createEmailMessage(validatedArgs: any): string {
 
 
 export async function createEmailWithNodemailer(validatedArgs: any): Promise<string> {
+    const { text, html } = resolveEmailBody(validatedArgs);
     // Validate email addresses
     (validatedArgs.to as string[]).forEach(email => {
         if (!validateEmail(email)) {
@@ -138,7 +133,7 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
 
     // Inline images can only be referenced from an HTML body via cid: URLs.
     const inlineImages = validatedArgs.inlineImages || [];
-    if (inlineImages.length > 0 && !validatedArgs.htmlBody) {
+    if (inlineImages.length > 0 && (!validatedArgs.htmlBody || html == null)) {
         throw new Error('inlineImages require htmlBody — a cid: reference only resolves from HTML content');
     }
 
@@ -221,8 +216,8 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         cc: validatedArgs.cc?.join(', '),
         bcc: validatedArgs.bcc?.join(', '),
         subject: validatedArgs.subject,
-        text: validatedArgs.body,
-        html: validatedArgs.htmlBody,
+        text,
+        html,
         attachments: attachments,
         inReplyTo: validatedArgs.inReplyTo,
         references: validatedArgs.references || validatedArgs.inReplyTo
