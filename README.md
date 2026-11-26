@@ -448,6 +448,8 @@ Embed images inside the HTML body so they render in place, instead of arriving a
 ### 2. Draft Email (`draft_email`)
 Creates a draft email without sending it. **Also supports attachments**.
 
+When replying in a thread (`threadId`), the draft is created without a Gmail `threadId` on the draft message itself: Gmail's web UI hides API drafts that carry one. The derived `In-Reply-To`/`References` headers make Gmail place the draft in the original thread when it is sent, while keeping it visible and openable in the Drafts list in the meantime.
+
 ```json
 {
   "to": ["recipient@example.com"],
