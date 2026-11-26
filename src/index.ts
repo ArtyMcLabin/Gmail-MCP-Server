@@ -489,10 +489,13 @@ async function main() {
                             .replace(/\//g, '_')
                             .replace(/=+$/, '');
                         
-                        const messageRequest = {
-                            raw: encodedMessage,
-                            ...(validatedArgs.threadId && { threadId: validatedArgs.threadId })
-                        };
+                        // NOTE: do NOT pass threadId to drafts.create. Gmail's web UI has a
+                        // long-standing bug where API drafts created with threadId are invisible
+                        // in the conversation view (and clicking them in Drafts opens the thread
+                        // instead of the compose window). The In-Reply-To/References headers
+                        // (derived above from the thread) make Gmail thread the message
+                        // correctly at SEND time, so dropping threadId here is safe.
+                        const messageRequest = { raw: encodedMessage };
                         
                         const response = await gmail.users.drafts.create({
                             userId: 'me',
@@ -528,8 +531,10 @@ async function main() {
                         raw: encodedMessage,
                     };
 
-                    // Add threadId if specified
-                    if (validatedArgs.threadId) {
+                    // threadId is intentionally NOT passed to drafts.create (Gmail UI bug,
+                    // see comment above); threading relies on the In-Reply-To/References
+                    // headers derived from the thread. messages.send keeps threadId.
+                    if (action === "send" && validatedArgs.threadId) {
                         messageRequest.threadId = validatedArgs.threadId;
                     }
 
